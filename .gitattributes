@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.dll  binary
+*.lib  binary
+*.a    binary
+*.exe  binary
+*.db   binary
+
+*.vue  text eol=lf
+*.rs   text eol=lf
+*.ts   text eol=lf
+*.md   text eol=lf

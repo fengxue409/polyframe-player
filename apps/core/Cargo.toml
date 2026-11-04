@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pf-parser",
+    "crates/pf-engine",
+    "crates/pf-proxy",
+    "crates/pf-core",
+    "crates/pf-mpv",
+    "crates/pf-netdisk",
+    "crates/pf-danmaku",
+    "crates/pf-magnet",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+# P11：mpsc::Receiver → Stream 包装（tokio 1.5x 起内置 Stream 实现已移除，须显式包装）
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["gzip", "stream", "json"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"
+url = "2"
+# P2：HLS AES-128 本地解密（RFC 8216 §4.3.2.4；cbc 0.1 配套 aes 0.8 / cipher 0.4）
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+# P4：MP4 多镜像首块 hash 预检（DESIGN §5）
+sha2 = "0.10"
+
+# 内部 crate
+pf-parser = { path = "crates/pf-parser" }
+pf-engine = { path = "crates/pf-engine" }
+pf-proxy = { path = "crates/pf-proxy" }
+pf-mpv = { path = "crates/pf-mpv" }
+pf-netdisk = { path = "crates/pf-netdisk" }
+pf-danmaku = { path = "crates/pf-danmaku" }
+pf-magnet = { path = "crates/pf-magnet" }

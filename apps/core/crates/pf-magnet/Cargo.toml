@@ -1,0 +1,13 @@
+[package]
+name = "pf-magnet"
+version.workspace = true
+edition.workspace = true
+description = "磁力/BT 片源：磁力链接归一 / 选片策略 / librqbit 会话封装（下载 + 流式读取）"
+
+[dependencies]
+librqbit = { version = "9", default-features = false, features = ["default-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+thiserror = "2"

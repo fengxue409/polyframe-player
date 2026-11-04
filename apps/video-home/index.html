@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyFrame · 视频站</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --text:#1a1d23; --text2:#6b7280;
+  --border:#e5e7eb; --accent:#ff5c39; --accent2:#ff8a5c;
+  --shadow:0 2px 10px rgba(0,0,0,.06); --radius:12px;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#14161a; --panel:#1e2127; --text:#e8eaed; --text2:#9aa0a8;
+    --border:#2d3138; --shadow:0 2px 10px rgba(0,0,0,.4); }
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:inherit;text-decoration:none}
+img{display:block}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+
+/* ===== 顶部导航 ===== */
+.topbar{position:sticky;top:0;z-index:100;background:var(--panel);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:20px;padding:0 24px;height:60px}
+.logo{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:800;flex-shrink:0}
+.logo .mark{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:grid;place-items:center;color:#fff;font-size:16px}
+.searchbox{flex:1;max-width:520px;display:flex;align-items:center;background:var(--bg);
+  border:1.5px solid var(--border);border-radius:20px;padding:0 6px 0 14px;height:38px;transition:border-color .2s}
+.searchbox:focus-within{border-color:var(--accent)}
+.searchbox input{flex:1;border:none;outline:none;background:none;color:var(--text);font-size:14px}
+.searchbox .s-btn{width:56px;height:30px;border-radius:16px;background:var(--accent);color:#fff;font-size:13px;flex-shrink:0}
+.nav-links{display:flex;gap:4px;margin-left:auto;flex-shrink:0}
+.nav-links a{padding:8px 14px;border-radius:8px;font-size:14px;color:var(--text2)}
+.nav-links a:hover{background:var(--bg);color:var(--text)}
+.avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#7c5cff,#4dabf7);
+  display:grid;place-items:center;color:#fff;font-size:14px;font-weight:700;flex-shrink:0}
+
+/* ===== 布局 ===== */
+.layout{display:flex;max-width:1400px;margin:0 auto;min-height:calc(100vh - 60px)}
+.sidebar{width:200px;flex-shrink:0;padding:20px 12px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto}
+.main{flex:1;padding:20px 24px;min-width:0}
+
+/* ===== 侧边栏 ===== */
+.side-title{font-size:12px;color:var(--text2);padding:0 12px;margin-bottom:8px;letter-spacing:1px}
+.side-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;font-size:14px;
+  color:var(--text2);margin-bottom:2px;transition:.15s;width:100%;text-align:left}
+.side-item .ico{font-size:17px;width:22px;text-align:center}
+.side-item:hover{background:var(--bg);color:var(--text)}
+.side-item.active{background:linear-gradient(90deg,rgba(255,92,57,.12),transparent);color:var(--accent);font-weight:600}
+.side-divider{height:1px;background:var(--border);margin:14px 8px}
+
+/* ===== 轮播 ===== */
+.carousel{position:relative;border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);aspect-ratio:21/8;min-height:220px;background:var(--panel)}
+.slides{display:flex;height:100%;transition:transform .5s cubic-bezier(.4,0,.2,1)}
+.slide{min-width:100%;height:100%;position:relative;display:flex;align-items:center;padding:6% 8%}
+.slide .s-info{position:relative;z-index:2;max-width:55%}
+.slide .s-tag{display:inline-block;background:var(--accent);color:#fff;font-size:12px;padding:3px 10px;border-radius:4px;margin-bottom:12px}
+.slide h2{font-size:clamp(18px,2.6vw,30px);color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.5);margin-bottom:8px}
+.slide p{color:rgba(255,255,255,.85);font-size:clamp(12px,1.4vw,15px);text-shadow:0 1px 4px rgba(0,0,0,.5);margin-bottom:14px}
+.slide .s-meta{color:rgba(255,255,255,.75);font-size:13px}
+.slide .s-play{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#fff;
+  padding:10px 22px;border-radius:22px;font-size:14px;font-weight:600;box-shadow:0 4px 14px rgba(255,92,57,.4)}
+.s-bg{position:absolute;inset:0;z-index:0}
+.s-bg::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,.15) 60%,transparent)}
+.car-btn{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;
+  background:rgba(0,0,0,.35);color:#fff;font-size:18px;z-index:5;display:grid;place-items:center;transition:.2s;backdrop-filter:blur(4px)}
+.car-btn:hover{background:var(--accent)}
+.car-btn.prev{left:12px}.car-btn.next{right:12px}
+.dots{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:5}
+.dot{width:8px;height:8px;border-radius:4px;background:rgba(255,255,255,.5);transition:.3s}
+.dot.on{width:22px;background:#fff}
+
+/* ===== 分类 Tab ===== */
+.sec-head{display:flex;align-items:center;gap:14px;margin:26px 0 16px;flex-wrap:wrap}
+.sec-head h3{font-size:18px;display:flex;align-items:center;gap:8px}
+.sec-head h3::before{content:"";width:4px;height:18px;border-radius:2px;background:var(--accent)}
+.tabs{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap}
+.tab{padding:6px 14px;border-radius:16px;font-size:13px;color:var(--text2);background:var(--panel);border:1px solid var(--border)}
+.tab.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* ===== 视频卡片 ===== */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+.card{background:var(--panel);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);
+  cursor:pointer;transition:transform .2s,box-shadow .2s}
+.card:hover{transform:translateY(-4px);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+.thumb{position:relative;aspect-ratio:16/9;overflow:hidden}
+.thumb img,.thumb .ph{width:100%;height:100%;object-fit:cover;transition:transform .3s}
+.card:hover .thumb img,.card:hover .thumb .ph{transform:scale(1.06)}
+.ph{display:grid;place-items:center;font-size:44px}
+.duration{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.75);color:#fff;
+  font-size:12px;padding:2px 7px;border-radius:4px;font-variant-numeric:tabular-nums}
+.c-info{padding:12px 14px 14px}
+.c-title{font-size:14px;font-weight:600;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;min-height:40px}
+.c-meta{display:flex;align-items:center;gap:12px;margin-top:8px;font-size:12px;color:var(--text2)}
+.c-meta .views::before{content:"▶";margin-right:4px;font-size:10px}
+.c-ch{margin-top:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:6px}
+.c-ch .ch-dot{width:20px;height:20px;border-radius:50%;font-size:10px;display:grid;place-items:center;color:#fff;font-weight:700}
+
+/* ===== 骨架屏 ===== */
+.sk-card{background:var(--panel);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow)}
+.sk{position:relative;overflow:hidden;background:var(--bg)}
+.sk::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent);
+  animation:shimmer 1.4s infinite}
+@keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.sk-thumb{aspect-ratio:16/9}
+.sk-line{height:13px;border-radius:6px;margin:12px 14px 0}
+.sk-line.w80{width:80%}.sk-line.w50{width:50%;margin-bottom:14px}
+
+/* ===== 空状态 ===== */
+.empty{display:none;flex-direction:column;align-items:center;padding:70px 20px;color:var(--text2);text-align:center}
+.empty.show{display:flex}
+.empty .e-ico{font-size:64px;margin-bottom:16px;opacity:.6}
+.empty h4{font-size:17px;color:var(--text);margin-bottom:8px}
+.empty p{font-size:14px}
+.empty button{margin-top:18px;padding:9px 24px;border-radius:20px;background:var(--accent);color:#fff;font-size:14px}
+
+/* ===== Toast ===== */
+.toast{position:fixed;bottom:30px;left:50%;transform:translate(-50%,80px);background:var(--text);color:var(--bg);
+  padding:10px 22px;border-radius:22px;font-size:14px;opacity:0;transition:.3s;z-index:999;pointer-events:none}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ===== 移动端 ===== */
+.menu-btn{display:none}
+@media (max-width:900px){
+  .sidebar{position:fixed;left:0;top:60px;z-index:90;background:var(--panel);transform:translateX(-100%);
+    transition:transform .25s;box-shadow:4px 0 20px rgba(0,0,0,.15)}
+  .sidebar.open{transform:translateX(0)}
+  .menu-btn{display:grid;place-items:center;width:36px;height:36px;border-radius:8px;font-size:18px;flex-shrink:0}
+  .menu-btn:hover{background:var(--bg)}
+  .nav-links{display:none}
+  .topbar{padding:0 14px;gap:10px}
+  .main{padding:14px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+  .c-title{font-size:13px}
+  .carousel{aspect-ratio:16/9}
+  .slide .s-info{max-width:80%}
+  .side-mask{position:fixed;inset:60px 0 0;background:rgba(0,0,0,.4);z-index:80;display:none}
+  .side-mask.show{display:block}
+}
+@media (max-width:480px){
+  .grid{grid-template-columns:1fr 1fr;gap:10px}
+  .searchbox .s-btn{width:40px}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== 顶部导航栏 ===== -->
+<header class="topbar">
+  <button class="menu-btn" id="menuBtn" aria-label="打开菜单">☰</button>
+  <a class="logo" href="#"><span class="mark">▶</span>PolyFrame</a>
+  <div class="searchbox">
+    <input id="searchInput" type="text" placeholder="搜索视频、UP主或合集…" aria-label="搜索">
+    <button class="s-btn" id="searchBtn">搜索</button>
+  </div>
+  <nav class="nav-links">
+    <a href="#">首页</a><a href="#">直播</a><a href="#">会员</a><a href="#">消息</a>
+  </nav>
+  <div class="avatar" title="我的账户">U</div>
+</header>
+
+<div class="layout">
+  <!-- ===== 侧边栏分类导航 ===== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-title">频道</div>
+    <button class="side-item active" data-cat="推荐"><span class="ico">🏠</span>推荐</button>
+    <button class="side-item" data-cat="热门"><span class="ico">🔥</span>热门</button>
+    <button class="side-item" data-cat="最新"><span class="ico">🆕</span>最新</button>
+    <button class="side-item" data-cat="订阅"><span class="ico">📺</span>订阅</button>
+    <div class="side-divider"></div>
+    <div class="side-title">分区</div>
+    <button class="side-item" data-cat="动画"><span class="ico">🎬</span>动画</button>
+    <button class="side-item" data-cat="音乐"><span class="ico">🎵</span>音乐</button>
+    <button class="side-item" data-cat="游戏"><span class="ico">🎮</span>游戏</button>
+    <button class="side-item" data-cat="科技"><span class="ico">💡</span>科技</button>
+    <button class="side-item" data-cat="知识"><span class="ico">📚</span>知识</button>
+  </aside>
+  <div class="side-mask" id="sideMask"></div>
+
+  <!-- ===== 主内容 ===== -->
+  <main class="main">
+    <!-- 推荐轮播 -->
+    <section class="carousel" id="carousel" aria-label="推荐视频轮播">
+      <div class="slides" id="slides"></div>
+      <button class="car-btn prev" id="prevBtn" aria-label="上一张">‹</button>
+      <button class="car-btn next" id="nextBtn" aria-label="下一张">›</button>
+      <div class="dots" id="dots"></div>
+    </section>
+
+    <!-- 分类区 -->
+    <section id="videoSection">
+      <div class="sec-head">
+        <h3 id="secTitle">🔥 热门视频</h3>
+        <div class="tabs" id="tabs">
+          <button class="tab on" data-sort="hot">热门</button>
+          <button class="tab" data-sort="new">最新</button>
+          <button class="tab" data-sort="sub">订阅</button>
+        </div>
+      </div>
+
+      <!-- 骨架屏（加载状态） -->
+      <div class="grid" id="skeleton"></div>
+
+      <!-- 视频卡片 -->
+      <div class="grid" id="grid" style="display:none"></div>
+
+      <!-- 空数据提示 -->
+      <div class="empty" id="empty">
+        <div class="e-ico">📭</div>
+        <h4>这里空空如也</h4>
+        <p id="emptyText">没有找到相关视频，换个关键词试试吧</p>
+        <button id="resetBtn">浏览热门视频</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================= 模拟数据 ================= */
+const GRADS = [
+  ["#667eea","#764ba2"],["#f093fb","#f5576c"],["#4facfe","#00f2fe"],
+  ["#43e97b","#38f9d7"],["#fa709a","#fee140"],["#30cfd0","#330867"],
+  ["#a8edea","#fed6e3"],["#ff9a9e","#fecfef"],["#ffecd2","#fcb69f"]
+];
+const CATS = ["动画","音乐","游戏","科技","知识"];
+const CHANNELS = ["星野工作室","像素猎人","深夜编码","喵呜电台","硬核科普君","云端旅人","二次元观察","极客小站"];
+const TITLES = [
+  "【4K修复】经典动画重制版 全网首发","三分钟看懂量子计算的底层原理","独立游戏开发日记：从零做出第一款游戏",
+  "2026 年最值得学的 5 门编程语言","深夜电台 · 适合写代码时听的 Lo-Fi 合集","手把手教你搭建家庭 NAS 服务器",
+  "全球旅行 Vlog：冰岛极光追逐记","揭秘游戏引擎渲染管线的前世今生","用 AI 生成的音乐竟然拿了比赛冠军？",
+  "科幻神作深度解析：你真的看懂了吗","新人 UP 主涨粉全攻略（亲测有效）","十年程序员聊：AI 会取代我们吗"
+];
+const DESC = "本期视频带你深入了解这一话题的方方面面，内容干货满满，记得点赞收藏支持一下~";
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd = mulberry32(20261026);
+
+function makeVideos(n, baseId){
+  const arr=[];
+  for(let i=0;i<n;i++){
+    const views = Math.floor(rnd()*9800000)+12000;
+    arr.push({
+      id: baseId+"-"+i,
+      title: TITLES[Math.floor(rnd()*TITLES.length)],
+      cat: CATS[Math.floor(rnd()*CATS.length)],
+      channel: CHANNELS[Math.floor(rnd()*CHANNELS.length)],
+      chColor: GRADS[Math.floor(rnd()*GRADS.length)][0],
+      views,
+      date: new Date(2026,9,26 - Math.floor(rnd()*60)).toISOString().slice(0,10),
+      duration: fmtDur(Math.floor(rnd()*5400)+45),
+      grad: GRADS[(baseId.length+i)%GRADS.length]
+    });
+  }
+  return arr;
+}
+function fmtDur(s){
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60), sec=s%60;
+  return (h?h+":":"")+String(m).padStart(h?2:1,"0")+":"+String(sec).padStart(2,"0");
+}
+function fmtViews(v){
+  if(v>=10000) return (v/10000).toFixed(1).replace(/\.0$/,"")+" 万";
+  return v.toString();
+}
+const DB = {
+  推荐: makeVideos(12,"rec"),
+  热门: makeVideos(12,"hot"),
+  最新: makeVideos(12,"new"),
+  订阅: makeVideos(8,"sub"),
+  动画: makeVideos(6,"ani"),
+  音乐: makeVideos(6,"mus"),
+  游戏: makeVideos(6,"gam"),
+  科技: makeVideos(6,"tec"),
+  知识: makeVideos(6,"knw")
+};
+
+/* ================= 轮播 ================= */
+const BANNER = DB.热门.slice(0,4);
+const slidesEl = document.getElementById("slides");
+const dotsEl = document.getElementById("dots");
+BANNER.forEach((v,i)=>{
+  const slide=document.createElement("div");
+  slide.className="slide";
+  slide.innerHTML=`
+    <div class="s-bg" style="background:linear-gradient(120deg,${v.grad[0]},${v.grad[1]})"></div>
+    <div class="s-info">
+      <span class="s-tag">编辑推荐</span>
+      <h2>${v.title}</h2>
+      <p>${DESC}</p>
+      <div class="s-meta">▶ ${fmtViews(v.views)} 次播放 · ${v.duration} · ${v.channel}</div>
+      <div style="margin-top:16px"><a class="s-play" href="#" onclick="return false">▶ 立即播放</a></div>
+    </div>`;
+  slidesEl.appendChild(slide);
+  const dot=document.createElement("button");
+  dot.className="dot"+(i===0?" on":"");
+  dot.setAttribute("aria-label","第"+(i+1)+"张");
+  dot.onclick=()=>go(i);
+  dotsEl.appendChild(dot);
+});
+let cur=0, timer;
+function go(i){
+  cur=(i+BANNER.length)%BANNER.length;
+  slidesEl.style.transform=`translateX(-${cur*100}%)`;
+  dotsEl.querySelectorAll(".dot").forEach((d,k)=>d.classList.toggle("on",k===cur));
+  restart();
+}
+function restart(){clearInterval(timer);timer=setInterval(()=>go(cur+1),5000)}
+document.getElementById("prevBtn").onclick=()=>go(cur-1);
+document.getElementById("nextBtn").onclick=()=>go(cur+1);
+restart();
+// 触摸滑动
+let tx=0;
+const car=document.getElementById("carousel");
+car.addEventListener("touchstart",e=>tx=e.touches[0].clientX,{passive:true});
+car.addEventListener("touchend",e=>{
+  const d=e.changedTouches[0].clientX-tx;
+  if(Math.abs(d)>40) go(cur+(d<0?1:-1));
+},{passive:true});
+
+/* ================= 视频卡片渲染 ================= */
+const grid=document.getElementById("grid");
+const skeleton=document.getElementById("skeleton");
+const empty=document.getElementById("empty");
+const emptyText=document.getElementById("emptyText");
+const secTitle=document.getElementById("secTitle");
+
+function coverHTML(v){
+  return `<div class="ph" style="background:linear-gradient(135deg,${v.grad[0]},${v.grad[1]})">
+    <span style="opacity:.85">${iconOf(v.cat)}</span></div>`;
+}
+function iconOf(cat){
+  return {动画:"🎬",音乐:"🎵",游戏:"🎮",科技:"💡",知识:"📚"}[cat]||"🎞";
+}
+function cardHTML(v){
+  return `<article class="card" data-id="${v.id}" onclick="toast('开始播放：${v.title.replace(/'/g,"")}')">
+    <div class="thumb">${coverHTML(v)}<span class="duration">${v.duration}</span></div>
+    <div class="c-info">
+      <div class="c-title">${v.title}</div>
+      <div class="c-meta"><span class="views">${fmtViews(v.views)}</span><span>${v.date}</span></div>
+      <div class="c-ch"><span class="ch-dot" style="background:${v.chColor}">${v.channel[0]}</span>${v.channel}</div>
+    </div>
+  </article>`;
+}
+function showSkeleton(n=8){
+  skeleton.innerHTML="";
+  skeleton.style.display="grid";
+  for(let i=0;i<n;i++){
+    const d=document.createElement("div");
+    d.className="sk-card";
+    d.innerHTML=`<div class="sk sk-thumb"></div><div class="sk sk-line w80"></div><div class="sk sk-line w50"></div>`;
+    skeleton.appendChild(d);
+  }
+}
+let state={cat:"热门",sort:"hot",query:""};
+
+function render(){
+  grid.style.display="none";
+  empty.classList.remove("show");
+  showSkeleton();
+
+  setTimeout(()=>{  // 模拟网络请求
+    skeleton.style.display="none";
+    let list=DB[state.cat]||[];
+
+    if(state.cat==="推荐"){
+      list=[...DB["热门"]].sort(()=>rnd()-.5);
+    }
+    if(state.sort==="new" && state.cat!=="最新"){
+      list=[...list].sort((a,b)=>b.date.localeCompare(a.date));
+    }
+    if(state.query){
+      const q=state.query.toLowerCase();
+      const all=[...DB["热门"],...DB["最新"],...DB["动画"],...DB["音乐"],...DB["游戏"],...DB["科技"],...DB["知识"]];
+      const seen=new Set();
+      list=all.filter(v=>{ if(seen.has(v.id))return false; seen.add(v.id);
+        return v.title.toLowerCase().includes(q)||v.channel.toLowerCase().includes(q)||v.cat.includes(q); });
+      secTitle.textContent=`🔍 “${state.query}” 的搜索结果`;
+    }else{
+      secTitle.textContent=({热门:"🔥 热门视频",最新:"🆕 最新发布",订阅:"📺 我的订阅",推荐:"✨ 为你推荐"}[state.cat])
+        || (iconOf(state.cat)+" "+state.cat+"分区");
+    }
+
+    grid.innerHTML=list.map(cardHTML).join("");
+    if(list.length===0){
+      emptyText.textContent = state.query
+        ? `没有找到与 “${state.query}” 相关的视频，换个关键词试试吧`
+        : "该分类暂时没有视频，去别的分区逛逛吧";
+      empty.classList.add("show");
+    }else{
+      grid.style.display="grid";
+    }
+  }, 700);
+}
+
+/* ================= 交互 ================= */
+const toastEl=document.getElementById("toast");
+let toastTimer;
+function toast(msg){
+  toastEl.textContent=msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>toastEl.classList.remove("show"),2000);
+}
+
+// 侧边栏分类
+document.querySelectorAll(".side-item").forEach(btn=>{
+  btn.onclick=()=>{
+    document.querySelectorAll(".side-item").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    state.cat=btn.dataset.cat;
+    state.query="";
+    document.getElementById("searchInput").value="";
+    syncTabs();
+    render();
+    closeSidebar();
+    window.scrollTo({top:0,behavior:"smooth"});
+  };
+});
+// 排序 Tab
+const tabs=document.querySelectorAll(".tab");
+function syncTabs(){
+  tabs.forEach(t=>t.classList.toggle("on",t.dataset.sort===state.sort));
+}
+tabs.forEach(t=>t.onclick=()=>{ state.sort=t.dataset.sort; syncTabs(); render(); });
+
+// 搜索
+const searchInput=document.getElementById("searchInput");
+function doSearch(){
+  const q=searchInput.value.trim();
+  if(!q){ toast("请输入搜索关键词"); return; }
+  state.query=q; render();
+}
+document.getElementById("searchBtn").onclick=doSearch;
+searchInput.addEventListener("keydown",e=>{ if(e.key==="Enter") doSearch(); });
+
+// 空状态重置
+document.getElementById("resetBtn").onclick=()=>{
+  state={cat:"热门",sort:"hot",query:""};
+  searchInput.value="";
+  document.querySelectorAll(".side-item").forEach(b=>b.classList.toggle("active",b.dataset.cat==="热门"));
+  syncTabs(); render();
+};
+
+// 移动端侧边栏
+const sidebar=document.getElementById("sidebar");
+const sideMask=document.getElementById("sideMask");
+function closeSidebar(){ sidebar.classList.remove("open"); sideMask.classList.remove("show"); }
+document.getElementById("menuBtn").onclick=()=>{ sidebar.classList.toggle("open"); sideMask.classList.toggle("show"); };
+sideMask.onclick=closeSidebar;
+
+/* 首次加载 */
+render();
+</script>
+</body>
+</html>

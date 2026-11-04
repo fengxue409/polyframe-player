@@ -1,0 +1,22 @@
+{
+  "name": "polyframe-player",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PolyFrame Player —— 多源镜像聚合 + 自动分片 + 多线程加载 + 边下边播的桌面播放器",
+  "scripts": {
+    "dev": "pnpm --filter @polyframe/desktop dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "core:build": "cargo build --release --manifest-path apps/core/Cargo.toml",
+    "smoke": "node apps/core/scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}

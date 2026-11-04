@@ -1,0 +1,12 @@
+[package]
+name = "pf-netdisk"
+version.workspace = true
+edition.workspace = true
+description = "PolyFrame 网盘视频源插件（provider 抽象 + 百度/阿里云/OneDrive/HTTP 目录适配）"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }

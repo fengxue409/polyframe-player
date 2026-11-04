@@ -1,0 +1,17 @@
+[package]
+name = "pf-proxy"
+version.workspace = true
+edition.workspace = true
+description = "PolyFrame 本地 HTTP 代理（下载与播放的唯一边界）"
+
+[dependencies]
+pf-engine = { workspace = true }
+pf-parser = { workspace = true }
+pf-netdisk = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }

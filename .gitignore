@@ -1,0 +1,67 @@
+# ==================== 依赖 ====================
+node_modules/
+.pnpm-store/
+
+# ==================== 构建产物 ====================
+out/
+dist/
+dist-electron/
+.vite/
+*.tsbuildinfo
+coverage/
+apps/core/target/
+
+# libmpv 二进制：117MB，超过 GitHub 单文件 100MB 硬上限；构建前按 README 放入
+apps/core/vendor/mpv/libmpv-2.dll
+apps/core/vendor/mpv/*.lib
+apps/core/vendor/mpv/*.a
+apps/core/vendor/mpv/libmpv.dll.a
+
+# ==================== 安装包产物 ====================
+apps/desktop/release/
+*.blockmap
+
+# ==================== 运行时数据与本机状态 ====================
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# ==================== 本地校验 / 探针工程（截图、临时库、结果 JSON） ====================
+.probe/
+.screenshots/
+.*check/
+.*-check/
+
+# ==================== 一次性现场脚本与审计输出（含真实源站地址、本机绝对路径） ====================
+audit-run*.log
+debug.log
+storm-urls.json
+storm-result.json
+multi-source-result.json
+playback-audit.json
+stress-feifan.mjs
+storm-bench.mjs
+probe-one.mjs
+
+# ==================== 编辑器与协作工具本地状态 ====================
+.workbuddy/
+.vscode/
+.idea/
+
+# ==================== 环境变量与私钥（一律不入库） ====================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+
+# ==================== 系统文件 ====================
+.DS_Store
+Thumbs.db
+desktop.ini
+NVIDIA Corporation/

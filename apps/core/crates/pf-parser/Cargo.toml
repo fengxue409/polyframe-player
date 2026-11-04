@@ -1,0 +1,17 @@
+[package]
+name = "pf-parser"
+version.workspace = true
+edition.workspace = true
+description = "PolyFrame 协议探测与解析（m3u8/MPD/MP4）"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+sha2 = { workspace = true }
+# fetch_text 软失败重试的退避 sleep
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

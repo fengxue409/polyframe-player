@@ -1,0 +1,12 @@
+[package]
+name = "pf-danmaku"
+version.workspace = true
+edition.workspace = true
+description = "弹幕：领域模型 / 文本校验 / 弹弹play 客户端 / ASS 生成（纯逻辑，可单测）"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+base64 = "0.22"

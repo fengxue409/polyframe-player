@@ -1,0 +1,25 @@
+[package]
+name = "pf-core"
+version.workspace = true
+edition.workspace = true
+description = "PolyFrame Rust 内核主进程（RPC 编排入口）"
+
+[[bin]]
+name = "pf-core"
+path = "src/main.rs"
+
+[dependencies]
+pf-engine = { workspace = true }
+pf-parser = { workspace = true }
+pf-proxy = { workspace = true }
+pf-mpv = { workspace = true }
+pf-netdisk = { workspace = true }
+pf-danmaku = { workspace = true }
+pf-magnet = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }

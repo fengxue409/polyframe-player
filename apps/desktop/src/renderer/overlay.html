@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      P17 弹幕覆盖层：透明窗口内只跑弹幕引擎，不加载 Vue 应用。
+      img-src 放开 http/https/data —— 图片弹幕来自任意图床；
+      connect-src 全禁 —— 本页不联网，弹幕数据全部经 IPC 注入。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src http: https: data:; font-src 'self'"
+    />
+    <title>danmaku-overlay</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        /* 完全透明：背景由主窗口的视频画面提供 */
+        background: transparent;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      /* 弹幕画布容器：位置/尺寸由主窗口 renderer 上报的视频区矩形决定 */
+      #dm-rect {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 0;
+        height: 0;
+        overflow: hidden;
+      }
+      #dm-canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="dm-rect"><canvas id="dm-canvas"></canvas></div>
+    <script type="module" src="/src/overlay/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+[package]
+name = "pf-engine"
+version.workspace = true
+edition.workspace = true
+description = "PolyFrame 下载调度引擎（多源聚合 / 分片调度）"
+
+[dependencies]
+pf-parser = { workspace = true }
+pf-netdisk = { workspace = true }
+pf-danmaku = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
