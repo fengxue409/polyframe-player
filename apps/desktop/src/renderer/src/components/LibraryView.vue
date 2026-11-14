@@ -1047,7 +1047,7 @@ async function resume(w: WatchProgress) {
         <div class="empty-ico">⭐</div>
         <div class="empty-title">还没有收藏</div>
         <div class="empty-sub">到「发现」页搜索影片，点卡片上的「收藏」即可把多站片源聚合成一个条目，支持连播、续播与追更。</div>
-        <button class="btn primary" @click="store.go('discover')">去发现页</button>
+        <button class="btn primary" @click="store.goDiscover()">去发现页</button>
       </div>
     </template>
     <CleanupDialog
@@ -1225,7 +1225,7 @@ async function resume(w: WatchProgress) {
 }
 .continue-card:hover {
   border-color: var(--accent-line);
-  background: #151b27;
+  background: var(--panel-hover);
 }
 .continue-poster {
   position: relative;
@@ -1356,7 +1356,7 @@ async function resume(w: WatchProgress) {
   border-radius: 50%;
   border: 1px solid rgb(255 255 255 / 0.16);
   background: rgb(6 9 14 / 0.72);
-  color: #e6ecf7;
+  color: var(--ov-text);
   font-size: 14px;
   line-height: 1;
   opacity: 0;
@@ -1388,7 +1388,7 @@ async function resume(w: WatchProgress) {
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.6px;
-  color: #cdd7e8;
+  color: var(--ov-dim);
 }
 .play-btn {
   width: 46px;
@@ -1397,7 +1397,7 @@ async function resume(w: WatchProgress) {
   padding: 0 0 0 3px;
   border-radius: 50%;
   border: 1px solid rgb(255 255 255 / 0.22);
-  background: rgb(76 125 255 / 0.86);
+  background: color-mix(in srgb, var(--accent) 86%, transparent);
   color: #fff;
   font-size: 14px;
   backdrop-filter: blur(6px);
@@ -1612,7 +1612,7 @@ async function resume(w: WatchProgress) {
   border: 1px solid rgb(255 255 255 / 0.12);
   backdrop-filter: blur(4px);
   font-size: 10px;
-  color: #cdd7e8;
+  color: var(--ov-dim);
 }
 /* 多图角标：点开看同一视频的全部封面 */
 .vg-multi {
@@ -1625,7 +1625,7 @@ async function resume(w: WatchProgress) {
   border-radius: 999px;
   border: 1px solid rgb(255 255 255 / 0.16);
   background: rgb(6 9 14 / 0.74);
-  color: #dbe4f2;
+  color: var(--ov-text);
   font-size: 10px;
   line-height: 1;
   backdrop-filter: blur(4px);

@@ -116,6 +116,7 @@ function pickSort(s: SortKey) {
 }
 
 function switchView(v: 'library' | 'favorites') {
+  player.homeTab = 'reco'
   if (view.value === v) return
   view.value = v
   query.value = ''
@@ -656,8 +657,21 @@ function goSlide(i: number) {
   slideIdx.value = (i + n) % n
   restartSlideTimer()
 }
+/** hover 暂停：用户正在看/正要点「立即播放」时别自动翻走 */
+let slidePaused = false
+function pauseSlide() {
+  slidePaused = true
+  if (slideTimer) clearInterval(slideTimer)
+  slideTimer = null
+}
+function resumeSlide() {
+  slidePaused = false
+  restartSlideTimer()
+}
 function restartSlideTimer() {
   if (slideTimer) clearInterval(slideTimer)
+  // prefers-reduced-motion：不自动翻页（翻页动画对前庭敏感用户是干扰）
+  if (slidePaused || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   slideTimer = setInterval(() => {
     const n = banners.value.length
     if (n) slideIdx.value = (slideIdx.value + 1) % n
@@ -714,12 +728,19 @@ onBeforeUnmount(() => {
           :placeholder="view === 'favorites' ? '在收藏里搜片名' : '搜索影片名，聚合全部启用的源站，回车确认'"
           @keyup.enter="doSearch"
         />
-        <button v-if="query" class="search-clear" title="清空搜索" @click="clearAll">
+        <button v-if="query" class="search-clear" title="清空搜索" aria-label="清空搜索" @click="clearAll">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M6 6l12 12M18 6L6 18" />
           </svg>
         </button>
-        <button class="btn primary search-go" :disabled="loading" @click="doSearch">搜索</button>
+        <button
+          class="btn ghost search-go"
+          :disabled="loading"
+          aria-label="搜索"
+          @click="doSearch"
+        >
+          搜索
+        </button>
       </div>
 
       <!-- 快捷分类条：类型常驻（最高频的一维），高级筛选收进按钮 -->
@@ -736,26 +757,40 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- P42：片库/收藏 + 刷新 与「筛选」并排，页头那一行整块撤掉 -->
+      <!-- P53：片库/收藏/发现 三段；发现已并入首页（DiscoverView 由 App 按 homeTab 切换） -->
       <div class="segmented view-seg" role="tablist" aria-label="视图">
         <button
           role="tab"
-          :aria-selected="view === 'library'"
-          :class="{ active: view === 'library' }"
+          :aria-selected="player.homeTab === 'reco' && view === 'library'"
+          :class="{ active: player.homeTab === 'reco' && view === 'library' }"
           @click="switchView('library')"
         >
           片库
         </button>
         <button
           role="tab"
-          :aria-selected="view === 'favorites'"
-          :class="{ active: view === 'favorites' }"
+          :aria-selected="player.homeTab === 'reco' && view === 'favorites'"
+          :class="{ active: player.homeTab === 'reco' && view === 'favorites' }"
           @click="switchView('favorites')"
         >
           收藏
         </button>
+        <button
+          role="tab"
+          :aria-selected="player.homeTab === 'discover'"
+          :class="{ active: player.homeTab === 'discover' }"
+          @click="player.homeTab = 'discover'"
+        >
+          发现
+        </button>
       </div>
-      <button class="icon-btn" :disabled="loading" title="按当前条件重新拉取" @click="load">
+      <button
+        class="icon-btn"
+        :disabled="loading"
+        title="按当前条件重新拉取"
+        aria-label="刷新片库"
+        @click="load"
+      >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
           <path d="M20 11a8 8 0 1 0-2.6 6.3" />
           <path d="M20 5v6h-6" />
@@ -813,6 +848,10 @@ onBeforeUnmount(() => {
       class="hero"
       role="region"
       aria-label="推荐"
+      @mouseenter="pauseSlide"
+      @mouseleave="resumeSlide"
+      @focusin="pauseSlide"
+      @focusout="resumeSlide"
       @touchstart.passive="onTouchStart"
       @touchend.passive="onTouchEnd"
     >
@@ -1853,7 +1892,7 @@ onBeforeUnmount(() => {
   padding: 1px 6px;
   border-radius: var(--r-sm);
   background: rgb(6 9 14 / 0.72);
-  color: #ffd166;
+  color: var(--gold);
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;

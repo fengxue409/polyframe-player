@@ -674,7 +674,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
         }
         "mpv.attach" => {
             let hwnd = params.get("hwnd").and_then(|h| h.as_i64()).unwrap_or(0);
-            let host = mpv_slot().lock().unwrap().clone();
+            let host = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(h) = host {
                 if h.is_alive() {
                     return ok_response(id, json!({ "attached": true, "reused": true }));
@@ -688,7 +688,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             match r {
                 Ok(host) => {
                     let host = Arc::new(host);
-                    *mpv_slot().lock().unwrap() = Some(host.clone());
+                    *mpv_slot().lock().unwrap_or_else(|p| p.into_inner()) = Some(host.clone());
                     tokio::spawn(mpv_state_pump(engine.clone(), host));
                     ok_response(id, json!({ "attached": true, "headless": hwnd == 0 }))
                 }
@@ -696,13 +696,13 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.detach" => {
-            if let Some(h) = mpv_slot().lock().unwrap().take() {
+            if let Some(h) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).take() {
                 let _ = h.stop();
             }
             ok_response(id, json!({ "detached": true }))
         }
         "mpv.load" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let url = params.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
@@ -717,7 +717,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.stop" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return ok_response(id, json!({ "stopped": true }));
             };
             match host.stop() {
@@ -726,7 +726,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.seek" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let secs = params.get("seconds").and_then(|s| s.as_f64()).unwrap_or(0.0);
@@ -737,7 +737,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.move" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let g = |k: &str| params.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -747,7 +747,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
         // 视频表面显隐（切页隐藏但不暂停）：子窗口只吃 Win32 显隐，不吃 DOM display:none
         "mpv.visible" => {
             let visible = params.get("visible").and_then(|v| v.as_bool()).unwrap_or(true);
-            match mpv_slot().lock().unwrap().clone() {
+            match mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() {
                 Some(host) => {
                     host.set_surface_visible(visible);
                     ok_response(id, json!({ "visible": visible, "attached": true }))
@@ -758,7 +758,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.set" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let (Some(name), Some(value)) = (
@@ -773,7 +773,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             }
         }
         "mpv.get" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
@@ -782,7 +782,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
             ok_response(id, json!({ "value": host.get_property(name) }))
         }
         "mpv.tracklist" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             ok_response(id, json!({ "tracks": host.tracklist() }))
@@ -790,7 +790,7 @@ async fn dispatch(line: &str, engine: &Arc<TaskManager>, proxy: &ProxyInfo) -> S
         // P14 弹幕：ASS 字幕加载需要 `sub-add` / `secondary-sub-add` 这类命令，
         // `mpv.set` 只能改属性，无法执行命令
         "mpv.command" => {
-            let Some(host) = mpv_slot().lock().unwrap().clone() else {
+            let Some(host) = mpv_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
                 return error_response(id, -32000, "mpv not attached");
             };
             let args: Vec<String> = params
@@ -822,7 +822,7 @@ async fn mpv_state_pump(engine: Arc<TaskManager>, host: Arc<pf_mpv::MpvHost>) {
         tokio::time::sleep(Duration::from_millis(250)).await;
         // 句柄已被替换/移除 → 泵退出
         {
-            let guard = mpv_slot().lock().unwrap();
+            let guard = mpv_slot().lock().unwrap_or_else(|p| p.into_inner());
             match guard.as_ref() {
                 Some(h) if Arc::ptr_eq(h, &host) => {}
                 _ => break,

@@ -413,8 +413,10 @@ defineExpose({
   <div ref="rootEl" class="danmaku-layer" :class="{ hidden: !domVisible }">
     <canvas ref="canvasEl" class="danmaku-canvas"></canvas>
 
-    <!-- P15：候选匹配面板（no_match 时手动指定弹幕库剧集） -->
-    <div v-if="showPicker" class="dm-picker">
+    <!-- P15：候选匹配面板（no_match 时手动指定弹幕库剧集）。
+         浮层压在视频画面上 → 恒暗区，挂 force-dark 吃回暗色 token，
+         不再自带一套硬编码色（P51 token 收口）。 -->
+    <div v-if="showPicker" class="dm-picker force-dark">
       <div class="dm-picker-head">
         <span>选择弹幕库剧集</span>
         <button class="dm-picker-close" title="关闭" @click="showPicker = false">×</button>
@@ -481,7 +483,7 @@ defineExpose({
   flex-direction: column;
   background: rgba(11, 14, 20, 0.92);
   backdrop-filter: blur(8px);
-  border: 1px solid #263049;
+  border: 1px solid var(--line-2);
   border-radius: 10px;
   pointer-events: auto;
   z-index: 3;
@@ -492,30 +494,31 @@ defineExpose({
   justify-content: space-between;
   padding: 8px 12px;
   font-size: 12px;
-  color: #c8d2e4;
-  border-bottom: 1px solid #1c2536;
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
 }
 .dm-picker-close {
   background: none;
   border: none;
-  color: #8f9cb4;
+  color: var(--text-dim);
   font-size: 16px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 2px 7px;
+  margin: -2px -3px;
 }
 .dm-picker-close:hover {
-  color: #fff;
+  color: var(--text);
 }
 .dm-picker-empty {
   padding: 14px 12px;
   font-size: 12px;
-  color: #8f9cb4;
+  color: var(--text-dim);
 }
 .dm-picker-search {
   display: flex;
   gap: 6px;
   padding: 8px 10px;
-  border-bottom: 1px solid #1c2536;
+  border-bottom: 1px solid var(--line);
 }
 .dm-picker-input {
   flex: 1;
@@ -523,9 +526,9 @@ defineExpose({
   padding: 5px 8px;
   font-size: 12px;
   border-radius: 6px;
-  border: 1px solid #263049;
+  border: 1px solid var(--line-2);
   background: rgba(6, 9, 14, 0.9);
-  color: #d7dce6;
+  color: var(--text);
 }
 .dm-picker-input:focus {
   outline: none;
@@ -536,9 +539,9 @@ defineExpose({
   padding: 5px 10px;
   font-size: 12px;
   border-radius: 6px;
-  border: 1px solid #263049;
-  background: rgba(61, 106, 224, 0.18);
-  color: #c8d2e4;
+  border: 1px solid var(--line-2);
+  background: var(--accent-soft);
+  color: var(--text);
   cursor: pointer;
 }
 .dm-picker-go:disabled {
@@ -547,14 +550,14 @@ defineExpose({
 }
 .dm-picker-foot {
   padding: 6px 10px;
-  border-top: 1px solid #1c2536;
+  border-top: 1px solid var(--line);
 }
 .dm-picker-local {
   background: none;
   border: none;
   padding: 2px 0;
   font-size: 11.5px;
-  color: #7aa7ff;
+  color: var(--accent-hi);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -576,14 +579,14 @@ defineExpose({
   text-align: left;
 }
 .dm-picker-item:hover {
-  background: rgba(122, 167, 255, 0.12);
+  background: var(--accent-soft);
 }
 .dm-picker-item .an {
   font-size: 12px;
-  color: #dfe6f2;
+  color: var(--text);
 }
 .dm-picker-item .ep {
   font-size: 11px;
-  color: #8f9cb4;
+  color: var(--text-dim);
 }
 </style>

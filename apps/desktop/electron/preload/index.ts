@@ -62,6 +62,35 @@ const api = {
     const listener = (): void => cb()
     ipcRenderer.on('pf:overlay-ready', listener)
     return () => ipcRenderer.removeListener('pf:overlay-ready', listener)
+  },
+  // ---- P50 应用更新 ----
+  /** 当前更新状态快照（phase / latest / progress / config …） */
+  updateState: (): Promise<unknown> => ipcRenderer.invoke('pf:update-state'),
+  /** 立即检查更新 */
+  updateCheck: (): Promise<unknown> => ipcRenderer.invoke('pf:update-check'),
+  /** 下载升级包（断点续传） */
+  updateDownload: (): Promise<unknown> => ipcRenderer.invoke('pf:update-download'),
+  /** 一键升级（安装版静默重装 / 便携版自替换后重启） */
+  updateInstall: (): Promise<unknown> => ipcRenderer.invoke('pf:update-install'),
+  /** 修改更新配置（enabled / autoDownload / intervalHours / repo / channels…） */
+  updateSetConfig: (patch: Record<string, unknown>): Promise<unknown> =>
+    ipcRenderer.invoke('pf:update-config', patch),
+  /** 历史 Release 列表（回退用） */
+  updateHistory: (): Promise<unknown> => ipcRenderer.invoke('pf:update-history'),
+  /** 下载并安装指定历史版本 */
+  updateInstallVersion: (tag: string): Promise<unknown> =>
+    ipcRenderer.invoke('pf:update-install-version', tag),
+  /** 逐个探测更新通道连通性 */
+  updateTestChannels: (): Promise<unknown> => ipcRenderer.invoke('pf:update-test-channels'),
+  /** 便携版：用 .pfold 备份还原上一版并重启 */
+  updateRestoreBackup: (): Promise<unknown> => ipcRenderer.invoke('pf:update-restore-backup'),
+  /** 资源管理器打开升级包缓存目录 */
+  updateOpenDir: (): Promise<boolean> => ipcRenderer.invoke('pf:update-open-dir'),
+  /** 主进程推送的更新状态（检查/下载进度/阶段变化） */
+  onUpdateState: (cb: (st: unknown) => void): (() => void) => {
+    const listener = (_e: unknown, st: unknown): void => cb(st)
+    ipcRenderer.on('pf:update-state', listener)
+    return () => ipcRenderer.removeListener('pf:update-state', listener)
   }
 }
 

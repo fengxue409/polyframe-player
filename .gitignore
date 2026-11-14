@@ -35,6 +35,8 @@ logs/
 .screenshots/
 .*check/
 .*-check/
+.uishop-app/
+.p54-app/
 
 # ==================== 一次性现场脚本与审计输出（含真实源站地址、本机绝对路径） ====================
 audit-run*.log

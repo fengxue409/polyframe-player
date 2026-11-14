@@ -55,6 +55,11 @@ pub fn sweep(
     // 2) 未播完 LRU：长期未动的半截任务
     let ttl_ms = (cfg.unfinished_days * 86_400_000.0) as i64;
     for id in store.stale_unfinished_tasks(now_ms, ttl_ms) {
+        // F2：protected（在途下载 / 播放活跃 / 起播解析中）的任务不许被清，
+        // 对齐第 3 段容量 LRU 的保护检查——否则起播中的任务会被 stale sweep 删掉。
+        if protected.contains(&id) {
+            continue;
+        }
         let (done, _total, bytes) = store.progress(&id);
         store.delete_task_cascade(&id);
         report.deleted_tasks += 1;

@@ -67,7 +67,7 @@ export function toPlainParams(params: unknown): unknown {
   }
 }
 
-/** P5 视图路由（App 壳切换，无 vue-router 依赖）；P7 增发现页；P8 增首页 */
+/** P5 视图路由（App 壳切换，无 vue-router 依赖）；P7 增发现页；P8 增首页；P53 发现并入首页（homeTab） */
 export type AppRoute =
   | 'home'
   | 'player'
@@ -75,7 +75,6 @@ export type AppRoute =
   | 'parse'
   | 'netdisk'
   | 'magnet'
-  | 'discover'
   | 'tasks'
   | 'library'
   | 'settings'
@@ -171,6 +170,8 @@ export const usePlayerStore = defineStore('player', {
     playbackRate: 1,
     // ---- P5 产品化：视图路由 + 跨页播放调度 ----
     route: 'home' as AppRoute,
+    /** P53 首页页内标签：reco = 片库/收藏（HomeView），discover = 发现（DiscoverView，并入首页） */
+    homeTab: 'reco' as 'reco' | 'discover',
     /** 媒体库/任务页点「播放」后置位，PlayerView 挂到 video 元素后消费 */
     pendingPlay: false,
     /**
@@ -343,6 +344,12 @@ export const usePlayerStore = defineStore('player', {
 
     go(route: AppRoute) {
       this.route = route
+    },
+
+    /** P53：原「去发现页」入口 —— 发现已并入首页，落到首页的发现标签 */
+    goDiscover() {
+      this.route = 'home'
+      this.homeTab = 'discover'
     },
 
     saveUiPrefs() {

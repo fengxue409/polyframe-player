@@ -48,8 +48,8 @@ function onDetailToast(msg: string) {
     <SideNav />
     <div class="main">
       <main class="content">
-        <!-- 首页 v-show 保活：保留轮播进度与滚动分类状态 -->
-        <HomeView v-show="store.route === 'home'" />
+        <!-- P53：首页/发现同属 route 'home'，按 homeTab 互斥；v-show 保活（轮播进度、搜索结果、弹层状态） -->
+        <HomeView v-show="store.route === 'home' && store.homeTab === 'reco'" />
         <!-- 播放页 v-show 保活：切页不打断播放 / video 元素常驻 -->
         <PlayerView v-show="store.route === 'player'" />
         <!-- 解析页 v-show 保活：保留内嵌播放页与解析结果（切走再回来不重载） -->
@@ -58,8 +58,8 @@ function onDetailToast(msg: string) {
         <NetdiskView v-show="store.route === 'netdisk'" />
         <!-- 磁力页 v-show 保活：保留输入与轮询状态 -->
         <MagnetView v-show="store.route === 'magnet'" />
-        <!-- 发现页 v-show 保活：保留搜索结果与弹层状态 -->
-        <DiscoverView v-show="store.route === 'discover'" />
+        <!-- P53 发现页并入首页：侧栏不再有独立入口，由首页工具条「发现」标签进入 -->
+        <DiscoverView v-show="store.route === 'home' && store.homeTab === 'discover'" />
         <TasksView v-if="store.route === 'tasks'" />
         <LibraryView v-if="store.route === 'library'" />
         <!-- 历史页 v-if：每次进来都重查，避免看到上一轮的旧列表 -->
@@ -124,6 +124,19 @@ function onDetailToast(msg: string) {
   --info: #58a6ff;
   --info-bg: color-mix(in srgb, var(--info) 14%, transparent);
   --info-line: color-mix(in srgb, var(--info) 34%, transparent);
+
+  /*
+   * 评分/热度金：只允许出现在海报深遮罩、视频舞台这类「恒暗」表面上
+   *（遮罩与主题无关，所以这支金也是恒定值，不做亮色变体）。
+   * 若将来要放在主题化表面上，必须另配亮色加深版，不能直接复用。
+   */
+  --gold: #ffd166;
+
+  /* 海报深遮罩上的恒亮文字：遮罩恒为深色（rgb(6 9 14 / …)），文字也恒定。
+   * 此前 History/Library 各自硬编码了 4 个近似白（cdd7e8/e6ecf7/dbe3f2/dbe4f2），
+   * 现收敛为两级，与主题文字的三级层次对齐。 */
+  --ov-text: #e6ecf7; /* 遮罩上的主文字 */
+  --ov-dim: #cdd7e8; /* 遮罩上的次级文字 */
 
   /* 圆角：4 档，按「元素尺寸越小圆角越小」分配 */
   --r-sm: 6px;
@@ -914,7 +927,9 @@ tbody tr:hover td {
   margin-bottom: var(--sp-1);
   border-radius: 50%;
   background: var(--panel-3);
-  border: 1px solid var(--line-2);
+  /* 品牌化：一圈强调色细边 + 内侧柔光，与侧栏 logo 呼应，空态不再「灰沉」 */
+  border: 1px solid var(--accent-line);
+  box-shadow: inset 0 0 0 3px var(--accent-soft);
   font-size: 22px;
   line-height: 1;
   opacity: 0.9;

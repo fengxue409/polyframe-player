@@ -260,10 +260,11 @@ function playGroupAll(group: CatalogEpisodeGroup): void {
 }
 .close-btn {
   position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 26px;
-  height: 26px;
+  top: 10px;
+  right: 10px;
+  /* 32px 热区：26px 时手指/鼠标都容易点空（WCAG 触控目标下限） */
+  width: 32px;
+  height: 32px;
   z-index: 2;
 }
 

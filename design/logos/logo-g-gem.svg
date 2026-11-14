@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <g transform="translate(60,58) scale(2.45)">
+    <path d="M24 78 L48 52 L80 78 Z" fill="#AFA9EC"/>
+    <path d="M112 52 L136 78 L80 78 Z" fill="#AFA9EC"/>
+    <path d="M48 52 L112 52 L80 78 Z" fill="#CECBF6"/>
+    <path d="M24 78 L80 78 L80 140 Z" fill="#378ADD"/>
+    <path d="M80 78 L136 78 L80 140 Z" fill="#185FA5"/>
+  </g>
+</svg>

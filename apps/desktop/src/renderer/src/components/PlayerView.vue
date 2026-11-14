@@ -361,6 +361,8 @@ function onCanplay(): void {
   if (videoEl.value && store.playbackRate !== 1) {
     videoEl.value.playbackRate = store.playbackRate
   }
+  // P58：单档源没有 RESOLUTION 可读，用实际解码高度显示「1080P」这类标签
+  mediaH.value = videoEl.value?.videoHeight ?? 0
 }
 
 // ---- 无画面状态提示 ----
@@ -829,6 +831,11 @@ async function syncMpvAss(): Promise<void> {
 function onSeeking(ev: Event): void {
   const t = (ev.target as HTMLVideoElement).currentTime
   if (Number.isFinite(t)) dmLayer.value?.seek(t)
+  // P48：点/拖原生进度条后焦点会留在控件的 closed shadow 内（那里的事件到不了 DOM），
+  // 借着这次 seek 把焦点收回 <video>，方向键才能继续生效
+  reclaimVideoFocus()
+  // P55：seek 后已缓冲区间会变，自研进度条的浅色底要跟着重画
+  syncBuffered()
 }
 
 // 弹幕数据 / 内核切换后，mpv 侧 ASS 需要重新生成
@@ -844,6 +851,888 @@ watch(mediaDuration, (d) => {
   if (d > 0) void syncMpvAss()
 })
 
+// ---- P54 容器全屏（画面内「选集 / 下一集」） ----
+
+/**
+ * 全屏对象是「视频区容器」（`.video-wrap`），而不是 `<video>` 本身。
+ *
+ * 原生元素全屏只把 video 推进 top layer：弹幕层、无画面提示、错误卡、画面内按钮
+ * 都是它的兄弟节点，一律不渲染（这也是过去全屏下弹幕消失的原因）。改成容器全屏后，
+ * 全屏元素里的一切都跟着进全屏；换集只替换 `<video>` 的 src，全屏状态不丢。
+ *
+ * 原生控制条里的全屏按钮必须摘掉（`controlsList="nofullscreen"` 在这版 Chromium 上
+ * 不生效，实际靠隐藏 `::-webkit-media-controls-fullscreen-button` 伪元素）：它走元素全屏，
+ * 一点到就把这套覆盖 UI 整个遮掉，等于退回旧行为。全屏入口统一留在控制条的「全屏」按钮。
+ */
+const isFullscreen = ref(false)
+/** 是否有任何全屏（含系统手势触发的原生 video 全屏），只用于按钮文案 */
+const fsAny = ref(false)
+/** 全屏选集面板是否展开 */
+const fsEpOpen = ref(false)
+/**
+ * P58 全屏弹层：速度 / 清晰度（null = 全关）。同一时刻只开一个，
+ * 且与选集面板互斥 —— 三者都挂在控制条上方同一片区域，叠起来谁也点不准。
+ */
+const fsMenu = ref<'speed' | 'quality' | null>(null)
+const fsEpListEl = ref<HTMLElement | null>(null)
+/**
+ * 全屏底部控制条高度（px）。**必须与 CSS 的 `--pf-fs-bar` 一致**：
+ * mpv 子窗口矩形按它扣减（子窗口恒画在 DOM 之上，不让出这条，玻璃条就被画面
+ * 永久盖住），弹幕层与快进提示也按它让位。
+ * P57 起画面本身不再扣这一条 —— 控制条是压在画面上的半透明玻璃（见 .fs-bar）。
+ */
+const FS_BAR_H = 72
+
+async function toggleFullscreen(): Promise<void> {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen()
+      return
+    }
+    const el = videoWrapEl.value
+    if (!el) return
+    await el.requestFullscreen()
+  } catch (e) {
+    store.pushLog('warn', `全屏切换失败：${(e as Error).message}`)
+  }
+}
+
+/**
+ * 全屏状态同步。挂在 document 的 fullscreenchange 上，而不是只认自家按钮：
+ * Esc、系统手势、以及（万一没被 controlsList 摘掉的）原生全屏按钮都会走到这里。
+ */
+function onFullscreenChange(): void {
+  const el = document.fullscreenElement
+  fsAny.value = !!el
+  isFullscreen.value = !!videoWrapEl.value && el === videoWrapEl.value
+  if (!isFullscreen.value) fsEpOpen.value = false
+  // P58：退出全屏时弹层一起收（它们只在全屏里存在）
+  if (!isFullscreen.value) fsMenu.value = null
+  // 进出全屏都要丢掉拖动/悬停残留：控制条会重建，留着只会是上一个布局的幽灵状态
+  fsScrubbing.value = false
+  fsHoverPos.value = null
+  // P56 退出全屏：收起状态必须清干净（窗口模式没有这条控件，
+  // 留着会让下次进全屏的头 2.6s 直接是「已收起」）
+  if (!isFullscreen.value) {
+    fsLastActive = 0
+    fsIdle.value = false
+    fsBarHover.value = false
+    fsAnim.value = false
+  }
+  // 全屏切换同时改了视频区的尺寸和位置：mpv 子窗口必须跟着搬一次
+  //（ResizeObserver 只看尺寸，位置变化它看不到）
+  scheduleMpvRect()
+  if (isFullscreen.value) {
+    // 键盘快进/快退要能用：焦点必须回到 <video>（焦点一旦停在原生控制的 closed
+    // shadow 里，键盘事件连 window 都到不了，见 P47）。容器全屏不会自动转移焦点。
+    videoEl.value?.focus({ preventScroll: true })
+    // P55：自研控制条接管后，暂停/静音/缓冲状态都从 video 现读一次，
+    // 免得进全屏的第一帧还显示着窗口模式里的旧状态
+    if (store.engine !== 'mpv') {
+      const v = videoEl.value
+      if (v) {
+        videoPaused.value = v.paused
+        fsMuted.value = v.muted
+      }
+      syncBuffered()
+    }
+    // 音量以渲染层这份状态为准（窗口模式下原生控制条改的音量已经回写过），
+    // 进全屏推一次，mpv 内核刚起来时也靠这一步对齐
+    applyVolume()
+    // P56 进全屏先亮出控制条，再开始空闲计时
+    fsLastPt = { x: -1, y: -1 }
+    fsBarHover.value = false
+    noteActivity()
+    // 等全屏布局落定再开过渡（用定时器而不是 rAF：隐藏窗口里 rAF 不回调，
+    // 而这里只需要「一帧之后」，120ms 足够，且两种窗口都可靠）
+    window.setTimeout(() => {
+      if (isFullscreen.value) fsAnim.value = true
+    }, 120)
+  } else {
+    reclaimVideoFocus()
+  }
+}
+
+/** 打开面板时把当前集滚进可视区：几十集的剧里点开就能看到「正在播的这集」 */
+watch(fsEpOpen, async (open) => {
+  if (!open) return
+  await nextTick()
+  fsEpListEl.value?.querySelector<HTMLElement>('.ep-btn.active')?.scrollIntoView({ block: 'center' })
+})
+
+/** 离开播放页必须退出全屏：否则整页只剩一块全屏画面，导航也点不到 */
+watch(
+  () => store.route,
+  (r) => {
+    if (r !== 'player' && document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+  }
+)
+
+/** 全屏内换集：成功后收起面板；失败把原因留在面板里，可原地重试 */
+async function onPickFsEpisode(i: number): Promise<void> {
+  if (picking.value >= 0) return
+  await onPickEpisode(i)
+  if (!sideError.value) fsEpOpen.value = false
+}
+
+/** 全屏内「下一集」：与侧栏同一入口（playAt），复用「切换中」状态与失败提示 */
+function onFsNext(): void {
+  if (!catalog.nextEpisode || picking.value >= 0) return
+  void onPickFsEpisode(queueIndex.value + 1)
+}
+
+/** 全屏内「上一集」：队列首集时按钮 disabled，这里再兜一道（键盘/程序调用） */
+function onFsPrev(): void {
+  if (queueIndex.value <= 0 || picking.value >= 0) return
+  void onPickFsEpisode(queueIndex.value - 1)
+}
+
+// ==========================================================================
+// P58 全屏控制条：传输组图标化 + 倍速 + 清晰度
+// --------------------------------------------------------------------------
+// 左侧原来只有一个孤零零的播放键，右边却挤着三个文字按钮 —— 视觉重心全压在右半。
+// 现在左侧是一个「传输组」（上一集 / 播放暂停 / 下一集，纯图标 + 悬浮提示），
+// 倍速与清晰度以「值胶囊」跟在轨道右侧（和音量组同属菜单型控件），
+// 右侧只留选集与退出全屏。整套动作的收益：文字按钮少一个、左侧成组、窄屏不挤。
+// ==========================================================================
+
+/**
+ * 点开弹层那一下的 pointerdown 已经被按钮自己吃掉了，紧随其后的 click 不能再去
+ * 触发「点画面 = 播放/暂停」—— 否则关个菜单顺手把片子暂停了。
+ * 用一个 400ms 的自动复位兜底：某些情况下 click 不会来（拖拽、按键），
+ * 留着 true 会把下一次真正的画面点击吃掉。
+ */
+let fsSwallowClick = false
+function swallowNextVideoClick(): void {
+  fsSwallowClick = true
+  window.setTimeout(() => (fsSwallowClick = false), 400)
+}
+
+function toggleFsMenu(which: 'speed' | 'quality'): void {
+  const next = fsMenu.value === which ? null : which
+  fsMenu.value = next
+  if (next === 'quality') void ensureVariants()
+  // 收起选集面板：两个弹层共用控制条上方这片空间
+  if (next) fsEpOpen.value = false
+}
+
+function toggleFsPanel(): void {
+  fsMenu.value = null
+  fsEpOpen.value = !fsEpOpen.value
+}
+
+// ---- 倍速 ----
+/** 胶囊上永远带一位小数：`1×` 看着像「第一档」，`1.0×` 才是「正常速度」 */
+const fsRateLabel = computed(() => {
+  const r = store.playbackRate
+  return `${Number.isInteger(r) ? r.toFixed(1) : r}×`
+})
+
+function pickFsRate(r: number): void {
+  fsMenu.value = null
+  void store.setPlaybackRate(r).catch(() => {})
+}
+
+// ---- 清晰度 ----
+/**
+ * 取档来源：任务自带的 master playlist（`task.masterUrl`，P3 就为「多清晰度」建过）。
+ *
+ * 为什么不在 hls.js 上直接换档（`hls.currentLevel`）：
+ *   页内播放用的是 `playUrl`（代理本地化后的**单档** media playlist，走下载引擎、
+ *   缓存/多源/解密全部生效）。它没有 variants，`levels` 恒为 1 —— 在它上面换档
+ *   是换不动的。要拿到全部档位只有一条路：把 master 里的某一档重新载入。
+ *   代价是换档要重载一次（丢了缓冲区，但有位置续播），换来的是「最高档仍然走
+ *   下载引擎」这条不能丢的性质 —— 其余档在代理侧是 `/raw` 透传（同 mpv 的既有行为）。
+ */
+interface FsVariant {
+  key: string
+  url: string
+  height: number
+  bandwidth: number
+  /** 最高码率那档 = 代理本地化的 playlist.m3u8，也就是当前默认播放的那档 */
+  top: boolean
+}
+const fsVariants = ref<FsVariant[]>([])
+/** 这份档位表是从哪个 master 解析出来的（判断「当前播的是 master 本身」用） */
+const fsVariantsMaster = ref('')
+/** 已解析过的任务 id（同一个任务反复开菜单不重复回源；force 可强制刷新） */
+const fsVariantsFor = ref('')
+const fsVariantsBusy = ref(false)
+const fsVariantsErr = ref('')
+/** 当前解码高度（单档源用来显示真实分辨率；mpv 侧拿不到，保持 0） */
+const mediaH = ref(0)
+
+/** 只认 `#EXT-X-STREAM-INF` 段：RESOLUTION 可能缺省，BANDWIDTH 一定有 */
+function parseMasterPlaylist(text: string): { url: string; height: number; bandwidth: number }[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trim())
+  const out: { url: string; height: number; bandwidth: number }[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const tag = /^#EXT-X-STREAM-INF:(.*)$/.exec(lines[i])
+    if (!tag) continue
+    const uri = lines[i + 1]
+    if (!uri || uri.startsWith('#')) continue
+    const res = /RESOLUTION=(\d+)x(\d+)/i.exec(tag[1])
+    const bw = /(?:^|,)BANDWIDTH=(\d+)/i.exec(tag[1])
+    out.push({ url: uri, height: res ? Number(res[2]) : 0, bandwidth: bw ? Number(bw[1]) : 0 })
+    i++ // URI 行已消费
+  }
+  return out
+}
+
+async function ensureVariants(force = false): Promise<void> {
+  const task = store.tasks.find((t) => t.id === store.sourceTaskId)
+  // 任务走它自己的 masterUrl（P3 那个「全 variant + EXT-X-MEDIA」的重写地址）；
+  // 手动直链没有任务，就直接拿当前 URL 试一次 —— 手动贴 master 也能列档位。
+  const master = task?.masterUrl ?? (/\.m3u8(\?|$)/.test(store.url) ? store.url : '')
+  const cacheKey = task?.id ?? master
+  if (!master) {
+    fsVariants.value = []
+    fsVariantsBusy.value = false
+    return
+  }
+  if (!force && fsVariantsFor.value === cacheKey) return
+  fsVariantsBusy.value = true
+  fsVariantsErr.value = ''
+  try {
+    const res = await fetch(master, { cache: 'no-store' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const parsed = parseMasterPlaylist(await res.text())
+    const maxBw = parsed.reduce((m, v) => Math.max(m, v.bandwidth), 0)
+    fsVariants.value = parsed
+      .map((v, i) => ({
+        key: `v${i}`,
+        // master 里的 URI 是代理重写过的绝对路径，按 masterUrl 补全 origin
+        url: new URL(v.url, master).href,
+        height: v.height,
+        bandwidth: v.bandwidth,
+        top: maxBw > 0 && v.bandwidth === maxBw
+      }))
+      .sort((a, b) => (a.height || a.bandwidth) - (b.height || b.bandwidth))
+    fsVariantsMaster.value = master
+    fsVariantsFor.value = cacheKey
+  } catch (e) {
+    fsVariants.value = []
+    fsVariantsErr.value = (e as Error).message
+    // 失败也记一次：菜单里给「重试」而不是每次打开都回源
+    fsVariantsFor.value = cacheKey
+  } finally {
+    fsVariantsBusy.value = false
+  }
+}
+
+/** 当前播放的是哪一档；-1 = 认不出（手输直链、档位刚切换完） */
+const fsVariantCurrent = computed(() => {
+  const u = store.url
+  const hit = fsVariants.value.findIndex((v) => v.url === u)
+  if (hit >= 0) return hit
+  // playUrl 指向代理本地化的最高档（/playlist.m3u8），与 master 里的 URI 字面不同
+  if (/\/playlist\.m3u8(\?|$)/.test(u)) {
+    const topIdx = fsVariants.value.findIndex((v) => v.top)
+    if (topIdx >= 0) return topIdx
+  }
+  /*
+   * 正在播 master 本身（手贴 master 直链 / 无任务的源）：hls.js 在内部按 ABR 选档，
+   * 档位表里推不出来，只能拿**实际解码高度**就近匹配。一个帧都没解出来时
+   * （清单还在解析 / 分片不是真 HLS）退回最高档 —— 那本来也是播放器的默认行为。
+   */
+  if (u === fsVariantsMaster.value) {
+    const h = mediaH.value
+    if (h > 0) {
+      let best = -1
+      let bestDiff = Infinity
+      fsVariants.value.forEach((v, i) => {
+        if (!v.height) return
+        const d = Math.abs(v.height - h)
+        if (d < bestDiff) {
+          bestDiff = d
+          best = i
+        }
+      })
+      // 差太远说明这不是同一张表里的档（源已经换了），别硬套一个上去
+      if (best >= 0 && bestDiff <= 180) return best
+    }
+    const topIdx = fsVariants.value.findIndex((v) => v.top)
+    if (topIdx >= 0) return topIdx
+  }
+  return -1
+})
+
+const fsQualityLabel = computed(() => {
+  const idx = fsVariantCurrent.value
+  if (idx >= 0 && fsVariants.value[idx]?.height) return `${fsVariants.value[idx].height}P`
+  if (fsVariants.value.length > 1) return '清晰度'
+  if (mediaH.value > 0) return `${mediaH.value}P`
+  return '原画'
+})
+
+interface FsMenuOpt {
+  key: string
+  label: string
+  meta?: string
+  active?: boolean
+  disabled?: boolean
+  run: () => void
+}
+
+const fsQualityOpts = computed<FsMenuOpt[]>(() => {
+  if (fsVariantsBusy.value) return [{ key: 'busy', label: '正在读取清晰度…', disabled: true, run: () => {} }]
+  if (fsVariantsErr.value) {
+    return [
+      { key: 'err', label: '读取失败', meta: fsVariantsErr.value.slice(0, 24), disabled: true, run: () => {} },
+      { key: 'retry', label: '重试', run: () => void ensureVariants(true) }
+    ]
+  }
+  const list = fsVariants.value
+  // 单档/无档时胶囊上已经显示了真实解码高度（`mediaH`），条目文案要跟它一致，
+  // 否则会出现「胶囊写着 720P、菜单里却只有一条『原画』」的自我矛盾。
+  const realLabel = mediaH.value > 0 ? `${mediaH.value}P` : '原画'
+  if (!list.length) {
+    return [{ key: 'only', label: realLabel, meta: '源仅一档', active: true, disabled: true, run: () => {} }]
+  }
+  if (list.length === 1) {
+    const v = list[0]
+    return [
+      {
+        key: v.key,
+        label: v.height ? `${v.height}P` : realLabel,
+        meta: '源仅一档',
+        active: true,
+        disabled: true,
+        run: () => {}
+      }
+    ]
+  }
+  return list.map((v, i) => ({
+    key: v.key,
+    label: v.height ? `${v.height}P` : `${Math.round(v.bandwidth / 1000)} kbps`,
+    meta: i === fsVariantCurrent.value ? '当前' : `${(v.bandwidth / 1_000_000).toFixed(1)} Mbps`,
+    active: i === fsVariantCurrent.value,
+    run: () => void pickFsQuality(i)
+  }))
+})
+
+/**
+ * 换档 = 用目标档的 playlist 重新载入一次，并回到原位置。
+ * 续播位置走 `catalog.pendingSeek`（hls 在 canplay 里消费），mpv 没有 canplay
+ * 这条路径，等 loadfile 落地后直接 seek。
+ */
+async function pickFsQuality(idx: number): Promise<void> {
+  const v = fsVariants.value[idx]
+  fsMenu.value = null
+  if (!v || idx === fsVariantCurrent.value || picking.value >= 0) return
+  const at = playPos.value
+  const dur = fsDur.value
+  // 片尾 5s 内不折腾：续播位置会让它立刻结束，看起来像「切完就停」
+  const resumeAt = at > 3 && dur > 0 && at < dur - 5 ? at : 0
+  const label = v.height ? `${v.height}P` : `${Math.round(v.bandwidth / 1000)} kbps`
+  store.pushLog('info', `切换清晰度 → ${label}${resumeAt ? `（${Math.round(resumeAt)}s 处续播）` : ''}`)
+  catalog.pendingSeek = resumeAt
+  store.url = v.url
+  const video = videoEl.value
+  if (!video) return
+  await store.play(video)
+  if (store.engine === 'mpv' && resumeAt > 0) {
+    // mpv 的 loadfile 是异步的：等一拍再定位（提前 seek 会被内核丢掉）
+    window.setTimeout(() => {
+      void store.mpvSeekTo(resumeAt).catch(() => {})
+    }, 600)
+  }
+}
+
+// 换集/换任务：档位列表作废（新任务的 master 是另一份），下次开菜单再回源
+watch(
+  () => store.sourceTaskId,
+  () => {
+    fsVariantsFor.value = ''
+    fsVariants.value = []
+    fsVariantsErr.value = ''
+    fsVariantsBusy.value = false
+    mediaH.value = 0
+    fsMenu.value = null
+  }
+)
+/*
+ * 手动直链换了地址（没有 task）时同样作废 —— 但**自己切档要放过**：
+ * pickFsQuality 会把 store.url 改成某一档的地址，如果这里无脑清空，
+ * 菜单下次打开就会去 parse 那个 media playlist，档位列表直接消失。
+ */
+watch(
+  () => store.url,
+  (u) => {
+    if (fsVariants.value.some((v) => v.url === u)) return
+    fsVariantsFor.value = ''
+    fsVariants.value = []
+    fsVariantsErr.value = ''
+  }
+)
+
+
+// ---- P55 全屏控制条：进度条与按钮是一个整体 ----
+
+/**
+ * 单一数据源。`playPos` / `playDur` 本来就由两条内核分别喂（hls 走 timeupdate、
+ * mpv 走 mpvState 状态泵），控制条的填充宽度、游标、时间文本、aria 值全部从
+ * 这两个 ref 派生 —— 不存在「按钮那边记一份、进度条那边记一份」的第二份状态。
+ */
+const fsDur = computed(() => (Number.isFinite(playDur.value) && playDur.value > 0 ? playDur.value : 0))
+const fsReady = computed(() => fsDur.value > 0)
+/** hls 的暂停态（mpv 读 mpvState.pause）；两条内核统一成一个布尔给按钮用 */
+const videoPaused = ref(true)
+/**
+ * P56 音量。mpv 侧 `MpvState` 不带 volume（内核只泵播放态），所以这里由渲染层持有
+ * 唯一一份音量：hls 写 `video.volume`、mpv 写 `volume` 属性，两边都从这份状态出发。
+ * 0–100 整数，与 mpv 的 `volume` 属性量纲一致（`volume-max` 默认 100）。
+ */
+const VOLUME_KEY = 'pf.player.volume'
+interface VolumeMemo {
+  v: number
+  m: boolean
+}
+function loadVolumeMemo(): VolumeMemo {
+  try {
+    const raw = localStorage.getItem(VOLUME_KEY)
+    if (!raw) return { v: 100, m: false }
+    const o = JSON.parse(raw) as Partial<VolumeMemo>
+    const v = typeof o.v === 'number' && Number.isFinite(o.v) ? Math.min(100, Math.max(0, Math.round(o.v))) : 100
+    return { v, m: !!o.m }
+  } catch {
+    return { v: 100, m: false }
+  }
+}
+const volMemo = loadVolumeMemo()
+const fsVolume = ref(volMemo.v)
+const fsMuted = ref(volMemo.m)
+/** 拖动音量滑杆中：期间不吃 timeupdate / volumechange 的反向同步，避免自己打自己 */
+const fsVolDragging = ref(false)
+/** 静音前的音量：取消静音要回到这个值，而不是回到 100 */
+let volBeforeMute = volMemo.v > 0 ? volMemo.v : 100
+/** 拖动期间 mpv 侧的推送节流（每帧一次 mpv.set volume 太浪费） */
+let volPushTimer: number | null = null
+let volPushLast = 0
+let volPushPending: number | null = null
+/** 拖动中：显示值冻结在手指位置，不让 timeupdate 把游标拽回去 */
+const fsScrubbing = ref(false)
+const fsScrubPos = ref(0)
+/** 悬停/拖动落点（秒）；null = 不显示气泡 */
+const fsHoverPos = ref<number | null>(null)
+/** 已缓冲到的位置（秒）；mpv 是原生子窗口，拿不到就恒为 0（浅色底不画） */
+const bufEnd = ref(0)
+
+const fsPaused = computed(() =>
+  store.engine === 'mpv' ? (store.mpvState?.pause ?? true) : videoPaused.value
+)
+const fsShownPos = computed(() => {
+  const p = fsScrubbing.value ? fsScrubPos.value : playPos.value
+  if (!Number.isFinite(p) || p < 0) return 0
+  return fsDur.value > 0 ? Math.min(p, fsDur.value) : p
+})
+const fsPct = computed(() => (fsDur.value > 0 ? `${(fsShownPos.value / fsDur.value) * 100}%` : '0%'))
+const fsBufPct = computed(() => {
+  if (fsDur.value <= 0 || bufEnd.value <= 0) return '0%'
+  return `${Math.min(100, (bufEnd.value / fsDur.value) * 100)}%`
+})
+const fsTimeLabel = computed(
+  () => `${fmtDur(fsShownPos.value)} / ${fsDur.value > 0 ? fmtDur(fsDur.value) : '--:--'}`
+)
+/** 气泡跟「拖动落点 > 悬停点」走：拖动时它显示的就是松手后会跳到的时间 */
+const fsTipPos = computed(() => (fsScrubbing.value ? fsScrubPos.value : fsHoverPos.value))
+const fsTipPct = computed(() => {
+  const p = fsTipPos.value
+  if (p === null || fsDur.value <= 0) return '0%'
+  return `${Math.min(100, Math.max(0, (p / fsDur.value) * 100))}%`
+})
+const fsTipLabel = computed(() => {
+  const p = fsTipPos.value
+  if (p === null || fsDur.value <= 0) return ''
+  return fmtDur(p)
+})
+
+function onVideoPlayState(paused: boolean): void {
+  videoPaused.value = paused
+  reclaimVideoFocus()
+}
+
+/**
+ * 音量/静音变化（也可能是键盘音量键、窗口模式下的原生控制条）同步到控件。
+ * 拖动滑杆期间忽略反向同步：我们自己刚写下去的值会以 volumechange 的形式弹回来，
+ * 一旦接受就会和手指位置打架（拖到 30 又被弹回 28）。
+ */
+function onVideoVolumeChange(): void {
+  const v = videoEl.value
+  if (v && store.engine !== 'mpv' && !fsVolDragging.value) {
+    fsMuted.value = v.muted
+    fsVolume.value = Math.round(v.volume * 100)
+    if (!v.muted && v.volume > 0) volBeforeMute = fsVolume.value
+    persistVolume()
+  }
+  reclaimVideoFocus()
+}
+
+/** 音量落盘：换集、换内核、重启都要保持一致，不受单个 <video> 实例的生死影响 */
+function persistVolume(): void {
+  try {
+    localStorage.setItem(VOLUME_KEY, JSON.stringify({ v: fsVolume.value, m: fsMuted.value }))
+  } catch {
+    /* 隐私模式 / 配额满：音量只是体验项，丢了不影响播放 */
+  }
+}
+
+/** 把当前音量推到内核（hls 直接写元素；mpv 走 mpv.set，属性量纲 0–100） */
+function applyVolume(): void {
+  const mute = fsMuted.value || fsVolume.value === 0
+  if (store.engine === 'mpv') {
+    void store.rpc(RpcMethod.MpvSet, { name: 'volume', value: String(fsVolume.value) }).catch(() => {})
+    void store.rpc(RpcMethod.MpvSet, { name: 'mute', value: mute ? 'yes' : 'no' }).catch(() => {})
+    return
+  }
+  const v = videoEl.value
+  if (!v) return
+  v.volume = Math.min(1, Math.max(0, fsVolume.value / 100))
+  v.muted = mute
+}
+
+/** mpv 侧推送节流：拖动时 100ms 一次，始终发送最新值（尾随） */
+function pushVolumeThrottled(): void {
+  volPushPending = fsVolume.value
+  const flush = (): void => {
+    volPushTimer = null
+    volPushLast = performance.now()
+    const v = volPushPending
+    volPushPending = null
+    if (v === null) return
+    void store.rpc(RpcMethod.MpvSet, { name: 'volume', value: String(v) }).catch(() => {})
+  }
+  if (volPushTimer !== null) return
+  const wait = Math.max(0, 100 - (performance.now() - volPushLast))
+  if (wait === 0) flush()
+  else volPushTimer = window.setTimeout(flush, wait)
+}
+
+/** 改音量：统一入口（滑杆、静音恢复、键盘都走这里） */
+function setVolume(next: number): void {
+  const v = Math.min(100, Math.max(0, Math.round(next)))
+  fsVolume.value = v
+  // 拖到 0 视为静音；从 0 往上拉自动解除静音 —— 否则会出现「拉到 60 还是没声音」
+  if (v === 0) fsMuted.value = true
+  else if (fsMuted.value) fsMuted.value = false
+  if (v > 0) volBeforeMute = v
+  if (store.engine === 'mpv') {
+    if (fsVolDragging.value) pushVolumeThrottled()
+    else applyVolume()
+    return
+  }
+  const el = videoEl.value
+  if (el) {
+    el.volume = v / 100
+    el.muted = fsMuted.value
+  }
+  if (!fsVolDragging.value) persistVolume()
+}
+
+function fsToggleMute(): void {
+  const next = !fsMuted.value
+  fsMuted.value = next
+  if (!next && fsVolume.value === 0) {
+    // 从 0 取消静音：恢复到静音前的音量，别把用户扔在「0 音量但没静音」的死角
+    fsVolume.value = volBeforeMute > 0 ? volBeforeMute : 50
+  }
+  if (next) volBeforeMute = fsVolume.value > 0 ? fsVolume.value : volBeforeMute
+  applyVolume()
+  persistVolume()
+  noteActivity()
+}
+
+/** 音量滑杆的指针纵坐标无关，横坐标映射 0–100 */
+function volPos(e: PointerEvent): number {
+  const el = e.currentTarget as HTMLElement | null
+  if (!el) return 0
+  const r = el.getBoundingClientRect()
+  if (r.width <= 0) return 0
+  return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * 100
+}
+function onVolDown(e: PointerEvent): void {
+  if (e.button !== 0) return
+  fsVolDragging.value = true
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  e.preventDefault()
+  setVolume(volPos(e))
+  noteActivity()
+}
+function onVolMove(e: PointerEvent): void {
+  if (!fsVolDragging.value) return
+  setVolume(volPos(e))
+  noteActivity()
+}
+function onVolUp(e: PointerEvent): void {
+  if (!fsVolDragging.value) return
+  const el = e.currentTarget as HTMLElement
+  if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+  fsVolDragging.value = false
+  // 拖动期间 hls 是逐帧写元素的，落盘与 mpv 的收尾推送在这里补
+  applyVolume()
+  persistVolume()
+  noteActivity()
+}
+/** 取消静音要回到的音量（滑杆填充与 0 对齐，因为静音 = 无声） */
+const fsVolFillPct = computed(() => (fsMuted.value ? 0 : fsVolume.value))
+
+// ---- P56 控制条自动隐藏 ----
+
+/**
+ * 空闲多久后收起控制条。2.6s 是个折中：短了「还在看时间轴」就被抽走，
+ * 长了又会挡住画面。任何一次交互都会重置计时（见 noteActivity）。
+ */
+const FS_IDLE_MS = 2600
+/**
+ * 指针停在控制条上时用更长的阈值：用户可能正在瞄准按钮。但**不是永不收起** ——
+ * 早前把 hover 当硬阻止，鼠标最后停在底部条上（很常见：看完控制条顺手把鼠标搁那）
+ * 就永远不收，看起来就是「自动隐藏根本没生效」。
+ */
+const FS_IDLE_HOVER_MS = 4200
+/** 心跳间隔：不靠一次性 setTimeout 决策，见 tickFsIdle */
+const FS_IDLE_TICK_MS = 400
+/** 控制条已收起（画面同时铺满整屏，见 CSS 的 .fs-idle） */
+const fsIdle = ref(false)
+/** 全屏布局稳定后置 true：只有这时才允许画面高度做过渡（否则进全屏会长大一次） */
+const fsAnim = ref(false)
+let fsIdleTick: number | null = null
+/** 最后一次交互的时刻（performance.now），0 = 还没进过全屏 */
+let fsLastActive = 0
+/** 指针正停在控制条上：只是延长阈值，不再阻止收起 */
+const fsBarHover = ref(false)
+
+/**
+ * 什么情况下禁止收起。逐条都是「收起来会让人骂」的场景：
+ * 暂停（正在看画面/找按钮）、拖进度或拖音量（手还在上面）、选集面板开着、正在换集、报错。
+ *
+ * 刻意**不**包含 `fsBarHover`（改为延长阈值）和 `!fsReady`：
+ * 后者是「还没起播」，而那时 `fsPaused` 必然为 true，已经被前一条覆盖；
+ * 但 `fsReady` 依赖 `duration > 0`，容器格式 / 直播源拿不到时长时会恒为 false ——
+ * 那会让控制条永久定在画面里，正好是这次要修的毛病。
+ */
+function fsIdleBlocked(): boolean {
+  return (
+    !isFullscreen.value ||
+    fsPaused.value ||
+    fsScrubbing.value ||
+    fsVolDragging.value ||
+    fsEpOpen.value ||
+    // P58：速度/清晰度弹层开着时不能收条 —— 收条会把弹层一起拖走
+    fsMenu.value !== null ||
+    picking.value >= 0 ||
+    !!store.playerError
+  )
+}
+
+/**
+ * 交互叫醒：立即显示并重置计时窗口。每次 pointermove 都会调，只写两个变量，可忽略。
+ */
+function noteActivity(): void {
+  if (!isFullscreen.value) return
+  fsLastActive = performance.now()
+  if (fsIdle.value) fsIdle.value = false
+}
+
+/**
+ * 心跳自检（每 400ms）。
+ *
+ * 为什么要有心跳，而不是一次 setTimeout 定生死：收起与否取决于 6 个状态，任何一次
+ * 状态变化都可能把「刚建好的计时器」变成错的（进全屏那一刻 `fsPaused` / `picking`
+ * 可能还没同步，`kickFsBar` 直接 return 了，之后就再也没有代码来建这个计时器）。
+ * 心跳每拍重算一遍，状态一旦满足就自己开始计时，不依赖「某次事件恰好触发」。
+ */
+function tickFsIdle(): void {
+  if (!isFullscreen.value) {
+    fsLastActive = 0
+    if (fsIdle.value) fsIdle.value = false
+    return
+  }
+  if (fsIdleBlocked()) {
+    // 阻塞期（暂停 / 拖动 / 面板 / 换集 / 报错）视为持续交互：
+    // 解除后要重新计满一个完整窗口，而不是一恢复就立刻收起
+    fsLastActive = performance.now()
+    if (fsIdle.value) fsIdle.value = false
+    return
+  }
+  const limit = fsBarHover.value ? FS_IDLE_HOVER_MS : FS_IDLE_MS
+  if (!fsIdle.value && performance.now() - fsLastActive >= limit) fsIdle.value = true
+}
+
+/** 状态变化后立刻重算一次（不必等下一拍，但也不再依赖它来建计时器） */
+function refreshFsIdle(): void {
+  tickFsIdle()
+}
+
+/**
+ * 全屏内的活动事件：鼠标移动（含触屏拖动）、按下、滚轮。
+ *
+ * 「指针是否停在控制条上」用**事件目标**判断，而不是 pointerenter/pointerleave 配一对布尔：
+ * 后者一旦丢了 leave（窗口失焦、指针直接飞出窗口、隐藏窗口里不派发 hover）就永久卡在
+ * 「停在条上」，控制条再也不收 —— 这是最容易出现的死锁。pointermove 一定会带 target，
+ * 每次移动顺手校正一次，状态就永远跟得上。
+ */
+/** 上一次指针坐标：用来识别「原地补发」的 pointermove（见 onFsActivity） */
+let fsLastPt = { x: -1, y: -1 }
+
+function onFsActivity(e?: Event): void {
+  if (!isFullscreen.value) return
+  // 布局变化（控制条收起、画面长高）之后 Chromium 会给鼠标下方补发一次 pointermove，
+  // 坐标与上次完全相同。把它当用户操作就会「收起 → 立刻唤醒」无限循环（每 2.6s 闪一下），
+  // 所以坐标没变直接忽略 —— 真移动必然带新坐标。
+  const pe = e as PointerEvent | undefined
+  if (pe && typeof pe.clientX === 'number') {
+    if (pe.clientX === fsLastPt.x && pe.clientY === fsLastPt.y) return
+    fsLastPt = { x: pe.clientX, y: pe.clientY }
+  }
+  const t = e?.target as HTMLElement | null
+  fsBarHover.value = !!t && typeof t.closest === 'function' && !!t.closest('.fs-bar')
+  noteActivity()
+}
+
+/**
+ * 收起/展开时画面几何要跟着变：收起后视频铺满整屏（否则画面下方留一条 72px 黑带）。
+ * mpv 是原生子窗口，CSS 改了它不动，必须显式把矩形重新喂一次。
+ */
+watch(fsIdle, () => {
+  scheduleMpvRect()
+})
+
+/** 这些状态一变，能不能收起就得重算（暂停、面板、换集、起播、报错、拖音量） */
+watch([fsPaused, fsEpOpen, picking, fsReady, fsVolDragging, () => store.playerError], refreshFsIdle)
+
+/** 媒体就绪 / 切内核：把持久化的音量推到当前内核（新实例默认是 100） */
+watch(
+  [fsReady, () => store.engine],
+  () => {
+    if (fsReady.value) applyVolume()
+  },
+  { immediate: true }
+)
+
+/**
+ * 已缓冲区间：分片缓存下 `buffered` 可能有多段，取「覆盖当前播放位置的那一段」，
+ * 都不覆盖时退回最远的一段 —— 浅色底只做「还能拖多远」的提示，不追求精确。
+ */
+function syncBuffered(): void {
+  const v = videoEl.value
+  if (!v || store.engine === 'mpv') {
+    bufEnd.value = 0
+    return
+  }
+  const b = v.buffered
+  if (!b || b.length === 0) {
+    bufEnd.value = 0
+    return
+  }
+  const t = v.currentTime
+  let end = 0
+  for (let i = 0; i < b.length; i++) {
+    if (b.start(i) <= t + 0.5 && b.end(i) >= t) {
+      end = b.end(i)
+      break
+    }
+    end = Math.max(end, b.end(i))
+  }
+  bufEnd.value = Number.isFinite(end) ? end : 0
+}
+
+function fsTogglePlay(): void {
+  if (!fsReady.value) return
+  if (store.engine === 'mpv') {
+    void store.mpvTogglePause()
+    return
+  }
+  const v = videoEl.value
+  if (!v) return
+  if (v.paused) {
+    void v.play().catch((e: unknown) => store.pushLog('warn', `播放失败：${(e as Error).message}`))
+  } else {
+    v.pause()
+  }
+}
+
+/**
+ * 全屏下点画面 = 播放/暂停，双击 = 退出全屏。
+ *
+ * 全屏时原生控制条整体下线（P55），Chromium 自带的「点画面暂停」是控制条的一部分，
+ * 一起没了；不补这两下，用户在全屏里点画面会觉得「点了没反应」。
+ * 只挂在 <video> 上：控制条、选集面板的点击不会冒泡到它。
+ */
+function onVideoClick(): void {
+  if (!isFullscreen.value) return
+  // P58：这一下点击是用来关弹层的（pointerdown 已处理），别再顺手暂停
+  if (fsSwallowClick) {
+    fsSwallowClick = false
+    return
+  }
+  reclaimVideoFocus()
+  fsTogglePlay()
+}
+
+/**
+ * P58：控制条之外按一下 = 关弹层。
+ * 只关弹层、不动播放：画面上那一下 click 由 `fsSwallowClick` 吃掉。
+ */
+function onFsPointerDown(e: PointerEvent): void {
+  onFsActivity(e)
+  if (!fsMenu.value) return
+  const t = e.target as HTMLElement | null
+  // 点在「胶囊 / 弹层」里：交给它们自己的 click（可能是换另一个弹层）
+  if (t?.closest('.fs-menu-wrap') || t?.closest('.fs-menu')) return
+  fsMenu.value = null
+  // 点在画面上（不在控制条内）才需要吞掉随后的 click
+  if (!t?.closest('.fs-bar')) swallowNextVideoClick()
+}
+
+function onVideoDblClick(): void {
+  if (!isFullscreen.value) return
+  void toggleFullscreen()
+}
+
+/** 指针横坐标 → 目标时间（track 的整条命中区都算，不是只有 5px 的细条） */
+function trackPos(e: PointerEvent): number {
+  const el = e.currentTarget as HTMLElement | null
+  if (!el || fsDur.value <= 0) return 0
+  const r = el.getBoundingClientRect()
+  const ratio = r.width > 0 ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0
+  return ratio * fsDur.value
+}
+
+function onTrackDown(e: PointerEvent): void {
+  if (!fsReady.value || e.button !== 0) return
+  fsScrubbing.value = true
+  fsScrubPos.value = trackPos(e)
+  fsHoverPos.value = fsScrubPos.value
+  // 指针捕获：拖出轨道甚至拖出画面也继续跟手，松手仍能在轨道上收到 pointerup
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  e.preventDefault()
+}
+
+function onTrackMove(e: PointerEvent): void {
+  if (!fsReady.value) return
+  const p = trackPos(e)
+  fsHoverPos.value = p
+  if (fsScrubbing.value) fsScrubPos.value = p
+}
+
+function onTrackLeave(): void {
+  if (fsScrubbing.value) return
+  fsHoverPos.value = null
+}
+
+/**
+ * 松手才真正 seek：拖动过程只更新游标与气泡（零请求），
+ * 否则 mpv 侧每一帧都会发一次 mpv.seek，长距离拖动会把内核拖到卡死。
+ */
+function onTrackUp(e: PointerEvent): void {
+  if (!fsScrubbing.value) return
+  const el = e.currentTarget as HTMLElement
+  if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+  const t = fsScrubPos.value
+  fsScrubbing.value = false
+  commitSeek(t, `跳到 ${fmtDur(t)} / ${fmtDur(fsDur.value)}`)
+}
+
 // ---- P3 libmpv：子窗口矩形跟随视频区（ResizeObserver + 窗口滚动/缩放） ----
 let mpvRectTimer: number | null = null
 /** 节流起点：滚动等连续事件要「立即跟 + 限频」，纯尾随防抖会让画面在滚动全程错位 */
@@ -858,10 +1747,15 @@ function syncMpvRect(): void {
   // 未布局（display:none / 首帧 ref 刚挂）时 rect 全 0，
   // 写进 mpv.move 会把子窗口压成 1×1 —— 画面就再也回不来了
   if (r.width < 2 || r.height < 2) return
-  void store.mpvMoveRect({ left: r.left, top: r.top, width: r.width, height: r.height })
+  // P54 全屏：底部控制条是 DOM 浮层，而 mpv 是 Win32 子窗口，永远画在 DOM 之上。
+  // 不把这条高度让出来，「选集 / 下一集」就会被画面整块盖住（同 P38 的叠层结论）。
+  // P56 控制条收起后画面铺满，子窗口也要跟着长高，否则底部留一条黑。
+  const pad = isFullscreen.value && !fsIdle.value ? FS_BAR_H : 0
+  const h = Math.max(2, r.height - pad)
+  void store.mpvMoveRect({ left: r.left, top: r.top, width: r.width, height: h })
   // P17：同一矩形喂给弹幕覆盖层（视口坐标，覆盖层窗口与主窗口内容区同原点）
   if (fxOverlayActive.value && overlayAvailable()) {
-    overlayRect({ left: r.left, top: r.top, width: r.width, height: r.height })
+    overlayRect({ left: r.left, top: r.top, width: r.width, height: h })
   }
 }
 function scheduleMpvRect(): void {
@@ -930,6 +1824,16 @@ onBeforeUnmount(() => {
   chromeRo?.disconnect()
   chromeRo = null
   window.removeEventListener('keydown', onDebugEsc)
+  // P48 键盘快进/快退
+  window.removeEventListener('keydown', onSeekKey, true)
+  // P56 任意按键叫醒控制条
+  window.removeEventListener('keydown', onAnyKey, true)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  if (seekTimer !== null) window.clearTimeout(seekTimer)
+  if (seekHintTimer !== null) window.clearTimeout(seekHintTimer)
+  // P56 空闲收起的心跳 / 音量推送的计时器
+  if (fsIdleTick !== null) window.clearInterval(fsIdleTick)
+  if (volPushTimer !== null) window.clearTimeout(volPushTimer)
   mpvRo?.disconnect()
   if (mpvRectTimer !== null) window.clearTimeout(mpvRectTimer)
   window.removeEventListener('scroll', scheduleMpvRect, true)
@@ -951,6 +1855,13 @@ function applySurface(): void {
   const onPlayer = store.route === 'player'
   // 意图：是否在播放页（决定起播时窗口该不该出来）
   store.setSurfaceWanted(onPlayer)
+  /*
+   * P48：离开播放页必须让 <video> 主动失焦。
+   * v-show 只是 display:none，不解除焦点；而焦点一旦停在原生控制的 closed shadow 里，
+   * 键盘事件就连 window 都到不了 —— 我们的路由判断根本没机会执行，原生会继续在
+   * 首页按「1% 时长」悄悄 seek（实测 +0.2s）。blur 之后事件才回到 body。
+   */
+  if (!onPlayer) videoEl.value?.blur()
   if (store.engine === 'mpv') {
     // 到播放页也得「真有内容」才恢复画面：按过停止后回来不该显示一块空黑窗口。
     // 注意不能只看 `mpvState` 是否存在 —— stop 之后状态泵仍会推 idle 快照回来。
@@ -1044,7 +1955,209 @@ function fmtDur(sec: number): string {
   const mmss = `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
   return h > 0 ? `${h}:${mmss}` : mmss
 }
+
+// ---- P48 键盘快进/快退（← / →） ----
+
+/**
+ * 单次按键的跳转步长（秒）。
+ *
+ * 取 5s 是因为它同时满足两种典型用法：40 分钟一集 ≈ 480 次步进，够细则能回到
+ * 「刚才那句台词」，够粗则连按十几下就能跳过片头。按住 Shift 走 30s 大步。
+ */
+const KEY_SEEK_STEP = 5
+const KEY_SEEK_STEP_FAR = 30
+/**
+ * 连击判定窗口：mpv 的 `timePos` 要 ~250ms 才回填，这段时间里读「真实播放位置」
+ * 会一直落在旧值上，按住方向键就等于原地打转。窗口内的连击一律以上次落点为基准。
+ */
+const KEY_SEEK_CHAIN_MS = 700
+/** 提交节流：键盘 auto-repeat 约 30 次/秒，不节流会把 mpv 的 RPC 打穿 */
+const KEY_SEEK_THROTTLE_MS = 120
+/** 提示条停留时长 */
+const KEY_SEEK_HINT_MS = 1100
+/** 片尾留白：clamp 到 duration 本身会立刻触发 ended，留 50ms 躲开 */
+const SEEK_TAIL_GUARD = 0.05
+
+/** 键盘跳转的即时反馈（不显示的话用户不知道一下跳了多远） */
+const seekHint = ref('')
+let seekHintTimer: number | null = null
+
+/** 键盘连击的累积落点与时间戳 */
+let seekAnchor: number | null = null
+let seekAnchorAt = 0
+/** 待提交的落点（节流窗口内累积） */
+let seekQueued: number | null = null
+let seekTimer: number | null = null
+let seekFlushAt = 0
+/** 最近一次按键的方向与步长，仅用于提示文案 */
+let seekDir: 1 | -1 = 1
+let seekStep = KEY_SEEK_STEP
+
+/**
+ * 当前可跳转的时间轴；null = 现在没有可跳的媒体。
+ *
+ * 两条内核的时长来源不同：hls 读 `<video>.duration`，mpv 读 `mpvState.duration`。
+ * 直播流两条都是 0 / 非有限值，此时直接放弃 —— 直播往回跳没有意义。
+ */
+function seekTimeline(): { pos: number; dur: number } | null {
+  if (store.engine === 'mpv') {
+    const s = store.mpvState
+    if (!s || !mpvHasMedia.value) return null
+    const dur = s.duration ?? 0
+    if (!Number.isFinite(dur) || dur <= 0) return null
+    return { pos: Math.max(0, s.timePos ?? 0), dur }
+  }
+  const v = videoEl.value
+  if (!v) return null
+  const dur = v.duration
+  if (!Number.isFinite(dur) || dur <= 0) return null
+  return { pos: Number.isFinite(v.currentTime) ? v.currentTime : 0, dur }
+}
+
+/** 画面里的即时反馈文本（键盘快进与进度条拖动共用一套定时器） */
+function showSeekText(text: string): void {
+  seekHint.value = text
+  if (seekHintTimer !== null) window.clearTimeout(seekHintTimer)
+  seekHintTimer = window.setTimeout(() => {
+    seekHint.value = ''
+    seekHintTimer = null
+  }, KEY_SEEK_HINT_MS)
+}
+
+function showSeekHint(pos: number, dur: number): void {
+  const arrow = seekDir > 0 ? '快进' : '快退'
+  showSeekText(`${arrow} ${seekStep}s · ${fmtDur(pos)} / ${fmtDur(dur)}`)
+}
+
+/** 真正落盘到播放器（两种内核各一条路径）；hintText 给进度条拖动用 */
+function commitSeek(target: number, hintText?: string): void {
+  const tl = seekTimeline()
+  if (!tl) return
+  const t = Math.min(Math.max(0, target), Math.max(0, tl.dur - SEEK_TAIL_GUARD))
+  if (store.engine === 'mpv') {
+    // 先喂弹幕引擎：mpv 状态空窗期里旧弹幕会继续飞
+    dmLayer.value?.seek(t)
+    void store.mpvSeekTo(t).catch(() => {})
+  } else {
+    const v = videoEl.value
+    if (v) v.currentTime = t
+    // hls 由 onSeeking 统一同步弹幕，这里不重复
+  }
+  // P55：两条内核都先把 UI 落到位 —— mpv 的状态泵有往返延迟，
+  // 不先写 playPos 的话游标会在松手后回跳一下（视觉上像没拖成功）。
+  playPos.value = t
+  if (hintText) showSeekText(hintText)
+  else showSeekHint(t, tl.dur)
+}
+
+/** 节流窗口结束时提交；窗口内只累积落点，不发请求 */
+function flushSeek(): void {
+  if (seekTimer !== null) {
+    window.clearTimeout(seekTimer)
+    seekTimer = null
+  }
+  const t = seekQueued
+  seekQueued = null
+  if (t === null) return
+  seekFlushAt = performance.now()
+  commitSeek(t)
+}
+
+function nudgeSeek(delta: number): void {
+  const tl = seekTimeline()
+  if (!tl) return
+  const now = performance.now()
+  const chained = seekAnchor !== null && now - seekAnchorAt < KEY_SEEK_CHAIN_MS
+  const base = chained ? (seekAnchor as number) : tl.pos
+  const t = Math.min(Math.max(0, base + delta), Math.max(0, tl.dur - SEEK_TAIL_GUARD))
+  seekDir = delta > 0 ? 1 : -1
+  seekStep = Math.abs(delta)
+  seekAnchor = t
+  seekAnchorAt = now
+  seekQueued = t
+  if (seekTimer !== null) return
+  const wait = KEY_SEEK_THROTTLE_MS - (now - seekFlushAt)
+  if (wait <= 0) flushSeek()
+  else seekTimer = window.setTimeout(flushSeek, wait)
+}
+
+/** 焦点是否在能吃方向键的控件里（输入框 / 下拉 / 可编辑区） */
+function inEditableField(el: EventTarget | null): boolean {
+  const n = el as HTMLElement | null
+  if (!n || typeof n.tagName !== 'string') return false
+  const tag = n.tagName.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true
+  return n.isContentEditable === true
+}
+
+function onSeekKey(e: KeyboardEvent): void {
+  // 播放页是 v-show 保活的：切到首页/媒体库/设置时这个监听还在，
+  // 所以「只在播放页生效」必须在这里显式判路由，不能只靠组件挂载与否。
+  if (store.route !== 'player') return
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+  if (e.defaultPrevented) return
+  // 搜索框、弹幕输入框、选集下拉里方向键是光标/选项操作，不能抢
+  if (inEditableField(e.target)) return
+  // 调试抽屉是浮层且带输入框；Ctrl/Alt/Meta 组合留给系统与其它快捷键
+  if (debugOpen.value || e.ctrlKey || e.metaKey || e.altKey) return
+  if (!seekTimeline()) return
+  /*
+   * 必须 preventDefault：原生 video 时间轴在键盘焦点下还有一条「跳 1% 时长」的
+   * 默认动作（P47 那条焦点环就来自同一套键盘焦点逻辑）。不拦住会变成 5s + 1% 双跳。
+   */
+  e.preventDefault()
+  const step = e.shiftKey ? KEY_SEEK_STEP_FAR : KEY_SEEK_STEP
+  nudgeSeek(e.key === 'ArrowRight' ? step : -step)
+}
+
+/*
+ * 用捕获阶段：原生 video 控制条在 shadow tree 内部处理键盘（点过进度条后焦点会钻进去），
+ * 冒泡阶段可能根本收不到，或在内部已经跳了 1% 才轮到我。捕获阶段先手拦下最稳。
+ */
+onMounted(() => window.addEventListener('keydown', onSeekKey, true))
+
+/**
+ * 任何按键都要叫醒控制条（空格暂停、Esc 退出、M 静音之后用户得看得见状态）。
+ * 单独挂一个监听而不是塞进 onSeekKey：那个函数满是「方向键才处理」的早退。
+ */
+function onAnyKey(): void {
+  if (store.route === 'player') noteActivity()
+}
+onMounted(() => window.addEventListener('keydown', onAnyKey, true))
+// 全屏状态（进出 + Esc + 原生全屏按钮统一入口）：同步覆盖 UI，并把焦点收回 <video>
+onMounted(() => document.addEventListener('fullscreenchange', onFullscreenChange))
+/**
+ * P56 空闲收起的心跳。用定时器自检而不是「进全屏时排一个 setTimeout」：
+ * 收起条件有 6 项，任何一项在进全屏那一刻还没同步（暂停判定、换集、面板）都会让
+ * 那唯一一次 setTimeout 直接不排，之后就没有任何东西来重建它 —— 表现就是「永不收起」。
+ */
+onMounted(() => {
+  if (fsIdleTick !== null) window.clearInterval(fsIdleTick)
+  fsIdleTick = window.setInterval(tickFsIdle, FS_IDLE_TICK_MS)
+})
+
+/**
+ * 把焦点从原生媒体控件的 closed shadow 里抢回 <video>。
+ *
+ * 实测（.probe/probe48-diag.mjs / probe48-fix.mjs）：点过进度条之后焦点会钻进媒体控件的
+ * closed shadow tree，此时 `document.activeElement` 仍是 VIDEO 但 `video.matches(':focus')`
+ * 为 false。**这个状态下 keydown / pointerdown 全都到不了 DOM**（window 捕获计数是 0，
+ * video 与 .video-wrap 上的 pointerdown 也一个都不触发），方向键就此退化成原生时间轴的
+ * 「跳 1% 时长」。而 `video.focus()` 能把焦点拉回宿主（同一次实验里 match 变 true、
+ * 后续 keydown 立刻恢复）。
+ *
+ * 因为连 pointerdown 都收不到，只能挂在这个状态下必然发生的事件上（seek / 播放暂停 /
+ * 音量 / 全屏），逐个动作后纠正一次。
+ */
+function reclaimVideoFocus(): void {
+  const v = videoEl.value
+  if (!v) return
+  if (document.activeElement === v && !v.matches(':focus')) v.focus({ preventScroll: true })
+}
+
 function onEngineSwitch(engine: 'hls' | 'mpv'): void {
+  // P58：切内核会重载媒体，弹层里的档位/倍速状态要重读
+  fsMenu.value = null
   void store.switchEngine(engine, videoEl.value ?? undefined).catch((e) => {
     store.pushLog('error', `切换内核失败：${(e as Error).message}`)
   })
@@ -1118,22 +2231,45 @@ function pct(x: number): string {
     <div class="stage">
       <!-- 播放区 -->
       <section ref="cardEl" class="card player">
-        <div ref="videoWrapEl" class="video-wrap force-dark">
+        <div
+          ref="videoWrapEl"
+          class="video-wrap force-dark"
+          :class="{ 'fs-idle': fsIdle, 'fs-anim': fsAnim, 'engine-mpv': store.engine === 'mpv' }"
+          @pointermove="onFsActivity"
+          @pointerdown="onFsPointerDown"
+          @wheel.passive="onFsActivity"
+        >
+          <!--
+            P55：全屏时交出原生控制条（`:controls="!isFullscreen"`）。
+            原生控制条是 closed shadow tree —— 既不能往里塞按钮，也读不到它的
+            进度/悬停状态，所以「按钮贴进度条」只能靠自研控制条：轨道与按钮
+            在同一个 flex 行里，天然共享中线和间距。窗口模式仍用原生控制条。
+          -->
           <video
             ref="videoEl"
-            controls
+            :controls="!isFullscreen"
+            controlsList="nofullscreen"
             playsinline
             @ended="onEnded"
             @timeupdate="onTimeUpdate"
+            @progress="syncBuffered"
             @canplay="onCanplay"
             @durationchange="onDurationChange"
             @seeking="onSeeking"
             @waiting="markStall(true)"
             @stalled="markStall(true)"
             @playing="markStall(false)"
+            @play="onVideoPlayState(false)"
+            @pause="onVideoPlayState(true)"
+            @volumechange="onVideoVolumeChange"
+            @click="onVideoClick"
+            @dblclick="onVideoDblClick"
+            @pointerdown="reclaimVideoFocus"
           ></video>
           <!-- P11 弹幕层：pointer-events:none，不挡控制条 -->
           <DanmakuLayer ref="dmLayer" :video="videoEl" :duration="mediaDuration" />
+          <!-- P48：← → 跳转的即时反馈（1.1s 后自动消失，不占布局、不挡控制条） -->
+          <div v-if="seekHint" class="seek-hint">{{ seekHint }}</div>
           <div v-if="!store.playing && !store.playerError" class="placeholder">
             <p>输入 HLS / MP4 直链后点击「播放」</p>
             <p class="dim small">双内核：hls.js 页内播放 / libmpv 子窗口渲染 · 经本地代理分片缓存</p>
@@ -1159,6 +2295,311 @@ function pct(x: number): string {
             <div class="ve-acts">
               <button class="stall-retry" @click="retryPlay">重新加载</button>
               <button class="ve-copy" @click="copyDiag">{{ copiedDiag ? '已复制' : '复制诊断信息' }}</button>
+            </div>
+          </div>
+
+          <!--
+            P54/P55/P57 全屏覆盖 UI：只在「容器全屏」时渲染。
+            画面铺满整个全屏面，控制条是压在画面下沿的一层半透明玻璃（blur + 压暗），
+            所以玻璃后面真的有画面可采样；mpv 子窗口按 wrap 矩形减 --pf-fs-bar 停在上沿，
+            不会被玻璃盖住。全屏期间原生控制条整体下线（video 的 controls 绑定在
+            isFullscreen 上），播放/暂停、进度、静音、全屏退出全部由这条自研控制条接管 ——
+            只有这样进度条与按钮才可能真正同处一行、共享中线。
+            整层 pointer-events:none，只有控件自己吃事件 —— 点画面照旧是播放/暂停。
+          -->
+          <div v-if="isFullscreen" class="fs-ui" :class="{ idle: fsIdle }">
+            <Transition name="pf-fs-pop">
+              <div v-if="fsEpOpen && queue.length" class="fs-panel" role="dialog" aria-label="选集">
+                <header class="fs-panel-head">
+                  <h4>选集<span class="fs-panel-count">共 {{ queue.length }} 集</span></h4>
+                  <button class="fs-icon-btn" title="关闭选集" @click="fsEpOpen = false">✕</button>
+                </header>
+                <div ref="fsEpListEl" class="fs-panel-body">
+                  <button
+                    v-for="(ep, i) in queue"
+                    :key="ep.url"
+                    class="ep-btn"
+                    :class="{ active: i === queueIndex }"
+                    :title="ep.name"
+                    :disabled="picking >= 0"
+                    @click="onPickFsEpisode(i)"
+                  >
+                    {{ ep.name }}
+                  </button>
+                </div>
+                <p v-if="sideError" class="fs-panel-err">{{ sideError }}</p>
+              </div>
+            </Transition>
+
+            <!--
+              P55/P58 控制条：**一条**组件，不是「一排按钮 + 别处的进度条」。
+              结构 = 上一行文字信息 + 下一行控制行：
+                [⏮][▶][⏭] [00:12 / 01:30] [====轨道====] [1.0×][1080P] [🔊 ▬▬] [选集][退出全屏]
+              按钮是轨道的**兄弟节点**（紧贴其末端），不是绝对定位悬浮在轨道上：
+              整行一个 flex、一个 align-items:center，轨道的可视细条垂直居中于
+              30px 命中区，按钮也是 30px —— 两者的中线天然重合，不需要任何
+              top/translate 魔法，也不会因为字号或换行而错位。
+            -->
+            <div class="fs-bar">
+              <div class="fs-bar-head">
+                <span class="fs-bar-title" :title="playCtx?.title || ''">{{ playCtx?.title || '正在播放' }}</span>
+                <span v-if="queue.length" class="fs-bar-ep">
+                  第 {{ queueIndex + 1 }}/{{ queue.length }} 集 · {{ currentEpName }}
+                </span>
+                <span v-else class="fs-bar-ep">手动直链 / 单集播放</span>
+                <span v-if="picking >= 0" class="fs-bar-busy">
+                  <span class="spin" aria-hidden="true"></span>正在切换第 {{ picking + 1 }} 集…
+                </span>
+              </div>
+
+              <div class="fs-bar-row">
+                <!--
+                  P58 传输组：三个**纯图标**按钮成组（组内 2px、组外一行 gap），
+                  每个都带 data-tip 悬浮提示 —— 图标省宽度，提示补语义。
+                  上一集/下一集在首尾集时 disabled（提示照常显示，说明为什么点不动）。
+                -->
+                <div class="fs-transport">
+                  <button
+                    class="fs-icon tip-start"
+                    :disabled="queueIndex <= 0 || picking >= 0"
+                    data-tip="上一集"
+                    aria-label="上一集"
+                    @click="onFsPrev"
+                  >
+                    <span class="ico-skip prev" aria-hidden="true"></span>
+                  </button>
+                  <button
+                    class="fs-icon play"
+                    :disabled="!fsReady"
+                    :data-tip="fsPaused ? '播放（空格）' : '暂停（空格）'"
+                    :aria-label="fsPaused ? '播放' : '暂停'"
+                    @click="fsTogglePlay"
+                  >
+                    <span :class="fsPaused ? 'ico-play' : 'ico-pause'" aria-hidden="true"></span>
+                  </button>
+                  <button
+                    class="fs-icon"
+                    :disabled="!catalog.nextEpisode || picking >= 0"
+                    :data-tip="catalog.nextEpisode ? `下一集 · ${catalog.nextEpisode.name}` : '已是最后一集'"
+                    aria-label="下一集"
+                    @click="onFsNext"
+                  >
+                    <span class="ico-skip next" aria-hidden="true"></span>
+                  </button>
+                </div>
+                <span class="fs-time">{{ fsTimeLabel }}</span>
+                <div
+                  class="fs-track"
+                  :class="{ scrubbing: fsScrubbing, idle: !fsReady }"
+                  role="slider"
+                  aria-label="播放进度"
+                  :aria-valuemin="0"
+                  :aria-valuemax="Math.round(fsDur)"
+                  :aria-valuenow="Math.round(fsShownPos)"
+                  :aria-disabled="!fsReady"
+                  @pointerdown="onTrackDown"
+                  @pointermove="onTrackMove"
+                  @pointerup="onTrackUp"
+                  @pointercancel="onTrackUp"
+                  @pointerleave="onTrackLeave"
+                >
+                  <div class="fs-rail">
+                    <div class="fs-rail-buf" :style="{ width: fsBufPct }"></div>
+                    <div class="fs-rail-fill" :style="{ width: fsPct }"></div>
+                    <div class="fs-rail-knob" :style="{ left: fsPct }"></div>
+                  </div>
+                  <span v-if="fsTipLabel" class="fs-track-tip" :style="{ left: fsTipPct }">{{ fsTipLabel }}</span>
+                </div>
+
+                <!--
+                  P58 倍速 / 清晰度：两个「值胶囊」。菜单型控件（点开选一档）而不是
+                  滑杆 —— 档位是离散且互斥的，用列表一眼看全；宽度固定只随文字变化，
+                  不会因为「1.0× → 1.25×」把右边的东西推走（tabular-nums）。
+                -->
+                <div class="fs-menu-wrap">
+                  <button
+                    class="fs-chip"
+                    :class="{ open: fsMenu === 'speed' }"
+                    data-tip="播放速度"
+                    aria-label="播放速度"
+                    :aria-expanded="fsMenu === 'speed'"
+                    @click="toggleFsMenu('speed')"
+                  >
+                    <svg class="ico-chip" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                      <path
+                        d="M2.6 11.4a5.6 5.6 0 119.8 0"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        fill="none"
+                        stroke-linecap="round"
+                      />
+                      <path d="M8 11.4 10.7 6.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </svg>
+                    <b>{{ fsRateLabel }}</b>
+                  </button>
+                  <Transition name="pf-fs-pop">
+                    <div v-if="fsMenu === 'speed'" class="fs-menu" role="menu" aria-label="播放速度">
+                      <p class="fs-menu-head">播放速度</p>
+                      <button
+                        v-for="r in RATES"
+                        :key="r"
+                        class="fs-menu-item"
+                        :class="{ active: r === store.playbackRate }"
+                        role="menuitemradio"
+                        :aria-checked="r === store.playbackRate"
+                        @click="pickFsRate(r)"
+                      >
+                        <span>{{ r === 1 ? '1.0× 正常' : `${r}×` }}</span>
+                        <span v-if="r === store.playbackRate" class="fs-menu-check" aria-hidden="true">✓</span>
+                      </button>
+                    </div>
+                  </Transition>
+                </div>
+                <div class="fs-menu-wrap">
+                  <button
+                    class="fs-chip"
+                    :class="{ open: fsMenu === 'quality' }"
+                    data-tip="清晰度"
+                    aria-label="清晰度"
+                    :aria-expanded="fsMenu === 'quality'"
+                    @click="toggleFsMenu('quality')"
+                  >
+                    <svg class="ico-chip" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                      <rect
+                        x="2"
+                        y="3.4"
+                        width="12"
+                        height="7.6"
+                        rx="1.3"
+                        stroke="currentColor"
+                        stroke-width="1.3"
+                        fill="none"
+                      />
+                      <path d="M6 13.6h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                    </svg>
+                    <b>{{ fsQualityLabel }}</b>
+                  </button>
+                  <Transition name="pf-fs-pop">
+                    <div v-if="fsMenu === 'quality'" class="fs-menu" role="menu" aria-label="清晰度">
+                      <p class="fs-menu-head">清晰度</p>
+                      <button
+                        v-for="opt in fsQualityOpts"
+                        :key="opt.key"
+                        class="fs-menu-item"
+                        :class="{ active: opt.active }"
+                        role="menuitemradio"
+                        :aria-checked="!!opt.active"
+                        :disabled="opt.disabled"
+                        @click="opt.run()"
+                      >
+                        <span>{{ opt.label }}</span>
+                        <span class="fs-menu-meta">{{ opt.meta }}</span>
+                      </button>
+                      <p class="fs-menu-foot" title="非最高档直连源站，不经过分片缓存">切档需重载并续播</p>
+                    </div>
+                  </Transition>
+                </div>
+                <!--
+                  P56 音量组：喇叭按钮 + 滑杆，**常显**而不是 hover 才展开 ——
+                  触屏没有 hover，常显是唯一在鼠标/触控/手写笔上都成立的做法。
+                  滑杆与进度条同一套视觉（同一中线、同一轨道粗细），只是更窄。
+                -->
+                <div class="fs-vol">
+                  <button
+                    class="fs-icon vol"
+                    :class="{ active: fsMuted || fsVolume === 0 }"
+                    :title="fsMuted ? '取消静音' : '静音'"
+                    :aria-label="fsMuted ? '取消静音' : '静音'"
+                    :aria-pressed="fsMuted"
+                    @click="fsToggleMute"
+                  >
+                    <svg class="ico-vol" viewBox="0 0 18 16" width="15" height="14" aria-hidden="true">
+                      <path d="M2 6h2.6L8 3.1v9.8L4.6 10H2z" fill="currentColor" />
+                      <template v-if="fsMuted || fsVolume === 0">
+                        <path d="M11.4 5.4l5 5.2M16.4 5.4l-5 5.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" />
+                      </template>
+                      <template v-else>
+                        <path d="M10.6 4.6a4.4 4.4 0 010 6.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none" />
+                        <path
+                          v-if="fsVolume >= 45"
+                          d="M12.9 2.6a7.3 7.3 0 010 10.8"
+                          stroke="currentColor"
+                          stroke-width="1.4"
+                          stroke-linecap="round"
+                          fill="none"
+                        />
+                      </template>
+                    </svg>
+                  </button>
+                  <div
+                    class="fs-vol-track"
+                    :class="{ scrubbing: fsVolDragging, muted: fsMuted }"
+                    role="slider"
+                    aria-label="音量"
+                    :aria-valuemin="0"
+                    :aria-valuemax="100"
+                    :aria-valuenow="fsMuted ? 0 : fsVolume"
+                    :aria-valuetext="fsMuted ? '已静音' : fsVolume + '%'"
+                    :title="`音量 ${fsMuted ? '已静音' : fsVolume + '%'}`"
+                    @pointerdown="onVolDown"
+                    @pointermove="onVolMove"
+                    @pointerup="onVolUp"
+                    @pointercancel="onVolUp"
+                  >
+                    <div class="fs-vol-rail">
+                      <div class="fs-vol-fill" :style="{ width: fsVolFillPct + '%' }"></div>
+                      <div class="fs-vol-knob" :style="{ left: fsVolFillPct + '%' }"></div>
+                    </div>
+                    <!-- 百分比气泡：悬停或拖动时淡入（纯 CSS，不占布局、不依赖 JS 计时器） -->
+                    <span class="fs-track-tip fs-vol-tip">{{ fsMuted ? '已静音' : `${fsVolume}%` }}</span>
+                  </div>
+                </div>
+                <!--
+                  P58：右侧只留「面板 / 退出」两个动作按钮 —— 「下一集」已经在左侧
+                  传输组里（图标 + 提示），留一份文字按钮就是同一件事两个入口。
+                  窄屏（≤1180px）下两个按钮收成图标，靠 data-tip 说明功能。
+                -->
+                <div class="fs-bar-acts">
+                  <button
+                    class="fs-act"
+                    :class="{ active: fsEpOpen }"
+                    :disabled="!queue.length"
+                    :aria-expanded="fsEpOpen"
+                    data-tip="选集"
+                    aria-label="选集"
+                    @click="toggleFsPanel"
+                  >
+                    <svg class="ico-act" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                      <path
+                        d="M2.5 4.2h11M2.5 8h11M2.5 11.8h7"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        fill="none"
+                      />
+                    </svg>
+                    <span class="fs-act-label">选集</span>
+                    <span v-if="queue.length" class="fs-act-num">{{ queueIndex + 1 }}/{{ queue.length }}</span>
+                  </button>
+                  <button
+                    class="fs-act tip-end"
+                    data-tip="退出全屏（Esc）"
+                    aria-label="退出全屏"
+                    @click="toggleFullscreen"
+                  >
+                    <svg class="ico-act" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                      <path
+                        d="M6 2.6H3.4a.8.8 0 00-.8.8V6M10 2.6h2.6a.8.8 0 01.8.8V6M6 13.4H3.4a.8.8 0 01-.8-.8V10M10 13.4h2.6a.8.8 0 00.8-.8V10"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                        fill="none"
+                      />
+                    </svg>
+                    <span class="fs-act-label">退出全屏</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1217,6 +2658,15 @@ function pct(x: number): string {
             @click="catalog.playNext().catch(() => {})"
           >
             下一集 ›
+          </button>
+          <!-- P54 全屏入口：走容器全屏（原生控制条的按钮已摘掉），全屏内才有选集/下一集 -->
+          <button
+            class="engine-btn"
+            :class="{ active: fsAny }"
+            :title="fsAny ? '退出全屏（Esc）' : '全屏播放：画面内提供选集与下一集'"
+            @click="toggleFullscreen"
+          >
+            {{ fsAny ? '退出全屏' : '全屏' }}
           </button>
           <template v-if="store.engine === 'mpv'">
             <button class="engine-btn" :disabled="!mpvHasMedia" @click="store.mpvTogglePause()">
@@ -1365,7 +2815,7 @@ function pct(x: number): string {
           <div class="side-empty-ico" aria-hidden="true">🎬</div>
           <p class="side-empty-title">还没有正在播放的影片</p>
           <p class="side-empty-sub">在「发现」页选一部片并点选集，这里会自动带出简介、剧集列表与来源。</p>
-          <button class="btn sm" @click="store.go('discover')">去发现页</button>
+          <button class="btn sm" @click="store.goDiscover()">去发现页</button>
         </div>
 
         <template v-else>
@@ -1728,6 +3178,38 @@ video {
 }
 .video-wrap :deep(video::-webkit-media-controls-timeline) {
   outline: none;
+}
+/*
+ * P54：原生控制条里的「全屏」按钮必须摘掉。
+ *
+ * 它走的是**元素全屏**（只把 <video> 推进 top layer），而我们的全屏 UI（选集 /
+ * 下一集 / 弹幕）都是 video 的兄弟节点 —— 一旦点了它，这些全被遮掉，等于退回旧行为。
+ * `controlsList="nofullscreen"` 在这版 Chromium 上不生效（实测按钮仍在），
+ * 只能直接隐藏这个伪元素；隐藏后全屏入口只保留控制条上的「全屏」按钮。
+ */
+.video-wrap :deep(video::-webkit-media-controls-fullscreen-button) {
+  display: none;
+}
+/*
+ * P48：键盘跳转提示。
+ * 只做视觉反馈，pointer-events 关掉，绝不挡住控制条；也不给 .video-wrap 加裁剪
+ * （P38：含 video 的容器一旦 overflow:hidden 会黑屏）。
+ */
+.seek-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 6;
 }
 .placeholder {
   position: absolute;
@@ -2955,6 +4437,960 @@ h4 {
 @media (max-height: 620px) {
   .card.player {
     position: static;
+  }
+}
+
+/* ==========================================================================
+   P54 容器全屏：画面内「选集 / 下一集」
+   --------------------------------------------------------------------------
+   全屏元素是 .video-wrap 本身，不是 <video>：只有容器全屏才能把弹幕层、提示层
+   与这套按钮一起带进全屏（元素全屏只渲染 video，兄弟节点全部消失）。
+
+   布局：画面铺满整个全屏面，控制条 --pf-fs-bar 压在下沿之上（P57 起是半透明玻璃）。
+   --------------------------------------------------------------------------
+   P57 之前画面给控制条让出 72px，条子坐在一条纯黑带上；改成玻璃后那条黑带就是
+   唯一的坏处 —— `backdrop-filter` 采样到的是 wrap 的纯黑，模糊等于没做。所以画面
+   恢复满幅，条子压在画面上：玻璃后面必须有真画面，半透明与模糊才有意义。
+   原生控制条在全屏期整体下线（见模板的 `:controls="!isFullscreen"`），不再需要
+   「贴着视频底边让位」；mpv 是 Win32 子窗口，矩形按 wrap 矩形减 FS_BAR_H 算
+   （syncMpvRect），天然停在条子上沿，不受这里影响。
+   ========================================================================== */
+.video-wrap:fullscreen {
+  --pf-fs-bar: 72px; /* 与脚本里的 FS_BAR_H 保持一致 */
+  width: 100vw;
+  height: 100vh;
+  aspect-ratio: auto;
+  /* P38 红线：这里仍然不能出现 border-radius / overflow:hidden */
+  border-radius: 0;
+  overflow: visible;
+}
+.video-wrap:fullscreen::backdrop {
+  background: #000;
+}
+/* object-fit: contain：极宽/极窄屏下画面按比例居中，两侧留黑而不是被拉变形 */
+.video-wrap:fullscreen video {
+  /* P57：满幅。控制条改成浮层后不再为它让高度 —— 让了它就只剩纯黑可采样 */
+  height: 100%;
+  object-fit: contain;
+}
+/* 收起时连指针一起藏：全屏观影时鼠标停在画面上很碍眼 */
+.video-wrap:fullscreen.fs-idle {
+  cursor: none;
+}
+/*
+ * `fs-anim` = 「进全屏后 120ms，布局已经落定」。在那之前不许控制条动效：
+ * 全屏刚建立时 wrap 会从窗口尺寸跳到全屏尺寸，任何 transform/opacity 过渡都
+ * 会跟着这段跳变跑一遍，看起来像条子自己弹了一下。
+ */
+.video-wrap:fullscreen:not(.fs-anim) .fs-bar {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fs-bar {
+    transition: none;
+  }
+}
+/*
+ * 画面内的几层浮层。
+ * P57 起画面满幅，控制条是压在画面上的玻璃 —— 所以：
+ *   * 居中提示按**整个**画面居中（不再减 72px，减了会整体偏上）；
+ *   * 弹幕与快进提示仍然让开底部这一条，否则最下面一两条轨道、提示文字
+ *     会躲进玻璃后面（透过玻璃看不清，等于白排）。
+ */
+.video-wrap:fullscreen :deep(.danmaku-layer) {
+  /* 弹幕层让开底部条：玻璃后面那 72px 弹幕既看不清也读不完 */
+  bottom: var(--pf-fs-bar);
+}
+/* 控制条收起后画面铺满，弹幕也要跟着铺满，否则最下面 72px 永远没有弹幕。
+   **这里不加过渡**：canvas 的 ResizeObserver 每帧都会重建画布与轨道布局，
+   给 72px 的位移做 12 帧动画 = 12 次全画布重分配，弹幕会明显抽一下。 */
+.video-wrap:fullscreen.fs-idle :deep(.danmaku-layer) {
+  bottom: 0;
+}
+.video-wrap:fullscreen .seek-hint {
+  /* 原生控制条已交给自研控制条（P55），提示只需要避开底部这一条 */
+  bottom: calc(var(--pf-fs-bar) + 20px);
+}
+/* 居中浮层（.placeholder / .stall-hint / .video-error）不再需要全屏专用偏移：
+   P57 画面恢复满幅后它们自带的 `inset:0` / `top:50%` 就是正确居中。
+   旧版本这里有一条 `top: calc((100% - 72px) / 2)`，是给「画面让出 72px」补偿的。 */
+
+/* 覆盖层：整层不吃事件，只有按钮自己吃（点画面照旧是播放/暂停） */
+.fs-ui {
+  position: absolute;
+  inset: 0;
+  z-index: 8; /* 高于弹幕(2/3)与提示(6)；原生控制条在 shadow 里，永远更靠上 */
+  pointer-events: none;
+}
+.fs-ui > * {
+  pointer-events: auto;
+}
+
+/* ==========================================================================
+   P55 控制条：进度条与按钮的「一体」是怎么落地的
+   --------------------------------------------------------------------------
+   定位方式 = **紧贴轨道末端、同处一行**（不是嵌入轨道内部，也不是悬浮其上）：
+     .fs-bar-row  一个 flex 行，align-items:center
+       [播放] [时间] [.fs-track flex:1] [静音] [.fs-bar-acts 选集/下一集/退出全屏]
+   * 轨道可视高度只有 5px，但它坐在 30px 高的命中区里垂直居中；
+     按钮同样是 30px 高、同一个 align-items:center —— 所以「轨道中线 = 按钮中线」
+     是布局算出来的，不靠 top/margin 硬凑，字号或文案变化都不会错位。
+   * 按钮组与轨道之间只有一行 gap（12px），没有分隔线、没有第二个背景层，
+     视觉上属于同一根控制条；hover 底色也来自同一套 token（--panel-3）。
+   * 轨道用 flex:1 吃掉所有剩余宽度：窗口/全屏宽度变化时按钮不挪位置，
+     只有轨道伸缩，时间文本用 tabular-nums + 固定宽度防止数字跳动推挤轨道。
+   ========================================================================== */
+
+/* ==========================================================================
+   P57 控制条玻璃化：半透明的「配方」是怎么定的
+   --------------------------------------------------------------------------
+   条子压在全屏画面下沿（P54 起的 72px 槽位改成浮层，见 .video-wrap:fullscreen）。
+   背后是**任意画面**，所以可读性不能靠「画面一般都很暗」，只能靠三层叠加：
+
+     ① 背景模糊  blur(22px)     —— 抹掉画面细节。细节是文字可读性的头号杀手：
+                                  没有它，一条电线/一行字幕正好穿过「00:12」就废了。
+     ② 压暗      brightness(.55) —— 把背后的亮部整体压到中低亮度。白场画面下
+                                  纯半透明底只剩 3.6:1，压暗后才够 WCAG AA。
+     ③ 半透明底  上 30% → 下 55% —— 上沿透一点（画面透得上来，条子不切断构图），
+                                  下沿实一点（控件与文字都坐在这一侧）。
+   saturate(150%) 是给「玻璃」这一步补的饱和度：压暗会顺手把颜色洗灰，
+   补回来才像有色玻璃而不是一层灰纱。
+
+   注意：**不能改回不透明底**。玻璃一旦不透明，backdrop-filter 就是纯开销；
+   而要真的看得见模糊，画面必须铺到条子底下 —— 这两件事是一组，改一个必须改另一个。
+   ========================================================================== */
+.fs-bar {
+  /* 玻璃上的两级墨色。
+     全局 --text-dim(#9aa5b8) 是为「恒暗面板」定的；压在任意画面上（且只压暗到
+     brightness .55）时对比度会掉到 2.3:1，图标和秒数就看不清了，所以条内单独抬一档。
+     shadow 是最后一道保险：遇到极端亮部（白场、雪景）时靠它把字形从背景里拉出来。 */
+  --fs-ink: color-mix(in srgb, var(--text) 94%, transparent);
+  --fs-ink-dim: color-mix(in srgb, var(--text) 80%, transparent);
+  --fs-ink-faint: color-mix(in srgb, var(--text) 62%, transparent);
+  --fs-ink-shadow: 0 1px 2px rgb(0 0 0 / 0.55);
+  --fs-hover-wash: color-mix(in srgb, #fff 12%, transparent);
+  --fs-line-soft: color-mix(in srgb, #fff 16%, transparent);
+  /*
+   * 强调色也要在条内改口。浅色主题的 --accent-ink 是深藏青（给白底用的），
+   * 落在压暗后的玻璃上直接消失；这里统一换成「亮蓝字 + 更实一点的蓝洗底」，
+   * 弹层里选中项（倍速/清晰度当前档）在两种主题下都能读。
+   */
+  --accent-soft: color-mix(in srgb, var(--accent) 24%, transparent);
+  --accent-ink: color-mix(in srgb, #d3e0ff 94%, transparent);
+  /*
+   * 弹层 / 悬浮提示统一往上抬「控制行上沿 → 条子上沿 + 8px」这段距离。
+   * 39 = 标题行 16 + 行距 4 + 垂直居中的上留白 11 + 8。小于这个数，弹层底边会
+   * 切进条子、把标题行盖掉一半；提示则会压在标题文字上（看起来像错位）。
+   * ≤900px 时标题行隐藏、控制行上移到 21，这个值跟着改 29。
+   */
+  --fs-pop-lift: 39px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* 高度锁死在 --pf-fs-bar：mpv 子窗口矩形按它扣减、弹幕层按它让位，内容再多也不许变高 */
+  height: var(--pf-fs-bar, 72px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 var(--sp-5);
+  /* 玻璃本体（底色 + backdrop-filter + 内高光）挂在 ::before 上，原因见下 */
+  border-top: 1px solid color-mix(in srgb, #fff 14%, transparent);
+  /* P56：收起时整条滑到视口下方 + 淡出。只动 transform/opacity，不触发重排，
+     所以「滑出」不会带动画面抖动；画面本身不再跟着变高度（P57 满幅） */
+  transition: transform 200ms var(--ease), opacity 160ms var(--ease);
+  will-change: transform;
+}
+/*
+ * P58：玻璃从 .fs-bar 本身挪到 ::before。
+ *
+ * 为什么非挪不可：带 `backdrop-filter` 的元素会为**后代**建立一个 backdrop root。
+ * 玻璃挂在 .fs-bar 上时，条内的速度/清晰度弹层就成了它的后代 —— 弹层的
+ * `backdrop-filter` 只能采样到「条的背景」，采不到画面，于是弹层退化成一块实色板
+ * （截图里能直接看出来：条子透出画面颜色，弹层是死的）。
+ * 挪到伪元素上：伪元素不是弹层的祖先，弹层的 backdrop root 回到文档根，
+ * 于是它也真的能磨到背后的画面。条的观感、遮罩强度、收起动效都不变。
+ */
+.fs-bar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, #070a10 30%, transparent) 0%,
+    color-mix(in srgb, #070a10 55%, transparent) 100%
+  );
+  -webkit-backdrop-filter: blur(22px) saturate(150%) brightness(0.55);
+  backdrop-filter: blur(22px) saturate(150%) brightness(0.55);
+  /* 上沿内高光：玻璃的「厚度」。只有亮线会像贴了条白边 */
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+/* 兜底：不支持背景模糊时，半透明底撑不住可读性，退回接近实底 */
+@supports not ((backdrop-filter: blur(4px)) or (-webkit-backdrop-filter: blur(4px))) {
+  .fs-bar::before {
+    background: rgb(9 12 18 / 0.94);
+  }
+}
+.fs-ui.idle .fs-bar {
+  transform: translateY(100%);
+  opacity: 0;
+  /* 藏起来就别再吃点击：否则画面底部的点击会被这条透明条吞掉 */
+  pointer-events: none;
+}
+.fs-bar-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  /* 文字行比控制行矮，靠行高而不是 flex 撑开，避免控制行的中线被顶偏 */
+  height: 16px;
+  line-height: 16px;
+}
+.fs-bar-title {
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--fs-ink);
+  text-shadow: var(--fs-ink-shadow);
+}
+.fs-bar-ep {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-2xs);
+  color: var(--fs-ink-faint);
+  font-variant-numeric: tabular-nums;
+  text-shadow: var(--fs-ink-shadow);
+}
+.fs-bar-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: var(--sp-2);
+  font-size: var(--fs-2xs);
+  color: var(--info);
+}
+.fs-bar-busy .spin {
+  width: 11px;
+  height: 11px;
+  border-width: 2px;
+}
+
+/* ---- 控制行：轨道与按钮共享同一条中线 ---- */
+.fs-bar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+/*
+ * P58 传输组：上一集 / 播放暂停 / 下一集。
+ * 组内 2px（三个图标属于同一件事，挤在一起才读成一个整体），组外仍是一行 gap。
+ * 三个键都是 30px 见方 —— 与轨道命中区、胶囊、.fs-act 同高，中线由
+ * align-items:center 算出来，不靠任何 margin 硬凑。
+ */
+.fs-transport {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.fs-transport .fs-icon {
+  min-width: 28px;
+  padding: 0 6px;
+}
+/* 行内图标按钮（播放 / 静音）：30px 见方，与轨道命中区、.fs-act 同高 */
+.fs-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 30px;
+  /* 全局 button 有 min-height:34px，不显式清掉 height 就压不下来，
+     轨道命中区 30px 与按钮 34px 虽然中线对齐，但上下沿会参差 */
+  min-height: 0;
+  min-width: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fs-ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+/* hover 用半透明白洗而不是 --panel-3：玻璃上的实心块会像贴了张纸 */
+.fs-icon:hover:not(:disabled) {
+  background: var(--fs-hover-wash);
+  border-color: var(--fs-line-soft);
+  color: var(--fs-ink);
+}
+.fs-icon.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.fs-icon:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* CSS 画的播放/暂停图标：不依赖字体，暗色下也锐利 */
+.ico-play {
+  width: 0;
+  height: 0;
+  border-left: 10px solid currentColor;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  /* 三角形视觉重心偏左，右移 1px 才和暂停两竖线居中对齐 */
+  margin-left: 2px;
+}
+.ico-pause {
+  width: 9px;
+  height: 12px;
+  border-left: 3px solid currentColor;
+  border-right: 3px solid currentColor;
+}
+/* 上一集 / 下一集：三角 + 竖线（`|◀` / `▶|`），与播放三角同一套画法 */
+.ico-skip {
+  position: relative;
+  display: block;
+  width: 13px;
+  height: 12px;
+}
+.ico-skip::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  translate: 0 -50%;
+}
+.ico-skip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  background: currentColor;
+  translate: 0 -50%;
+}
+.ico-skip.prev::before {
+  left: 2px;
+  border-right: 7px solid currentColor;
+}
+.ico-skip.prev::after {
+  left: 1px;
+}
+.ico-skip.next::before {
+  right: 2px;
+  border-left: 7px solid currentColor;
+}
+.ico-skip.next::after {
+  right: 1px;
+}
+/* 时间：mono + tabular-nums 本身就是等宽数字，不额外定宽 —— 定宽会让
+   文本在框内左对齐，右端空出一截，看起来像时间与轨道之间多了一个间距 */
+.fs-time {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fs-ink-dim);
+  white-space: nowrap;
+  text-shadow: var(--fs-ink-shadow);
+}
+
+/* ---- 轨道 ---- */
+.fs-track {
+  position: relative;
+  flex: 1 1 auto;
+  /* 命中区 30px，可视细条只有 5px —— 按细条算点击区域会「点不中」 */
+  height: 30px;
+  min-width: 64px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+.fs-track.idle {
+  cursor: default;
+  opacity: 0.5;
+}
+.fs-rail {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  border-radius: var(--r-pill);
+  /* 26% 而不是 22%：玻璃背后可能是亮画面，未播部分是「轨道本体」，
+     太淡就直接消失在背景里，看不出这条能拖 */
+  background: color-mix(in srgb, var(--text) 26%, transparent);
+  transition: height var(--t-fast) var(--ease);
+}
+.fs-track:hover .fs-rail,
+.fs-track.scrubbing .fs-rail {
+  height: 7px;
+}
+/* 已缓冲：比轨道亮一档，比已播暗 —— 三层信息叠在同一条轨道上 */
+.fs-rail-buf {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--text) 34%, transparent);
+}
+.fs-rail-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.fs-rail-knob {
+  position: absolute;
+  top: 50%;
+  /* 垂直居中用独立的 translate（transform 已被 scale 占着，塞不进去）；
+     缺这一句圆点的「顶边」会落在轨道中线上，整个点下移半个直径 */
+  translate: 0 -50%;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #000 35%, transparent);
+  transform: scale(0.72);
+  transition: transform var(--t-fast) var(--ease);
+  pointer-events: none;
+}
+.fs-track:hover .fs-rail-knob,
+.fs-track.scrubbing .fs-rail-knob {
+  transform: scale(1);
+}
+/* 悬停/拖动气泡：贴在轨道正上方，不参与布局 */
+.fs-track-tip {
+  position: absolute;
+  bottom: 26px;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---- P56 音量组：喇叭按钮 + 常显滑杆 ----
+   常显而不是 hover 展开：触屏没有 hover，常显在鼠标/触控/手写笔上行为一致。
+   填充用中性色（--text-dim）而不是强调色，强调色留给进度，一眼能分开两条轨道。 */
+.fs-vol {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.ico-vol {
+  display: block;
+}
+.fs-vol-track {
+  position: relative;
+  flex: none;
+  width: 72px;
+  /* 与轨道、按钮同一个 30px 命中高度 → 中线由 align-items:center 对齐 */
+  height: 30px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+.fs-vol-rail {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--text) 26%, transparent);
+  transition: height var(--t-fast) var(--ease);
+}
+.fs-vol-track:hover .fs-vol-rail,
+.fs-vol-track.scrubbing .fs-vol-rail {
+  height: 7px;
+}
+.fs-vol-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--fs-ink-dim);
+}
+.fs-vol-track.muted .fs-vol-fill {
+  background: var(--fs-ink-faint);
+}
+.fs-vol-knob {
+  position: absolute;
+  top: 50%;
+  /* 同 .fs-rail-knob：不带 translate 就会比轨道低半个直径 */
+  translate: 0 -50%;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #000 35%, transparent);
+  transform: scale(0.7);
+  transition: transform var(--t-fast) var(--ease);
+  pointer-events: none;
+}
+.fs-vol-track:hover .fs-vol-knob,
+.fs-vol-track.scrubbing .fs-vol-knob {
+  transform: scale(1);
+}
+/* 百分比气泡：常驻 DOM、只切 opacity —— 不参与布局，也不会因插入/移除让轨道抖一下 */
+.fs-vol-tip {
+  left: 50%;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.fs-vol-track:hover .fs-vol-tip,
+.fs-vol-track.scrubbing .fs-vol-tip {
+  opacity: 1;
+}
+
+.fs-bar-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* ==========================================================================
+   P58 倍速 / 清晰度：值胶囊 + 玻璃弹层
+   --------------------------------------------------------------------------
+   用「胶囊 + 列表」而不是滑杆/下拉：档位是离散且互斥的，列表一眼看全所有选项，
+   点一下就落；原生 <select> 在全屏 top-layer 里的下拉列表由系统绘制，
+   配色与这条玻璃完全对不上，所以自绘。
+   胶囊宽度由内容决定（tabular-nums 保证「1.25×」不会把右边挤走）。
+   ========================================================================== */
+.fs-menu-wrap {
+  position: relative;
+  display: flex;
+  flex: none;
+  /* 弹层停在**控制条上沿**而不是胶囊上沿 —— 具体留多少由 .fs-bar 的
+     --fs-pop-lift 统一给（提示气泡用的是同一个值，两者才不会一高一低）。 */
+}
+.fs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  height: 30px;
+  min-height: 0;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fs-ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-2xs);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: var(--fs-ink-shadow);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.fs-chip b {
+  font-weight: 500;
+}
+.fs-chip:hover,
+.fs-chip.open {
+  background: var(--fs-hover-wash);
+  border-color: var(--fs-line-soft);
+  color: var(--fs-ink);
+}
+.fs-chip.open {
+  border-color: color-mix(in srgb, #fff 26%, transparent);
+}
+.ico-chip {
+  display: block;
+  opacity: 0.85;
+}
+/* 弹层：贴着胶囊上沿展开，与选集面板同一套玻璃（同圆角、同模糊、同阴影） */
+.fs-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--fs-pop-lift, 39px));
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 152px;
+  max-width: 236px;
+  max-height: min(46vh, 360px);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, #fff 14%, transparent);
+  border-radius: var(--r-lg);
+  /* 弹层浮在画面上，磨的是**画面**（玻璃本体已挪到 .fs-bar::before，弹层不再被
+     条的 backdrop root 框住）。透明度比条子略实：弹层里是密集小字，需要更稳的底；
+     但也不许再往上加 —— 加到 80% 以上玻璃就变回一块实色板，和条子脱节。 */
+  background: color-mix(in srgb, #090c13 64%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(150%) brightness(0.62);
+  backdrop-filter: blur(18px) saturate(150%) brightness(0.62);
+  box-shadow: var(--shadow-3);
+}
+.fs-menu-head {
+  padding: 2px 8px 4px;
+  font-size: var(--fs-2xs);
+  color: var(--fs-ink-faint);
+}
+.fs-menu-foot {
+  padding: 4px 8px 2px;
+  font-size: var(--fs-2xs);
+  line-height: 1.45;
+  /* 脚注是「会用得上」的说明（不是装饰），比标题行再亮一档；
+     faint 在深玻璃上只有 ~2.6:1，一行小字会读不出来 */
+  color: var(--fs-ink-dim);
+}
+.fs-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 28px;
+  min-height: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fs-ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.fs-menu-item:hover:not(:disabled) {
+  background: color-mix(in srgb, #fff 10%, transparent);
+  color: var(--fs-ink);
+}
+.fs-menu-item.active {
+  background: var(--accent-soft);
+  /* 选中项的文字用**白墨**而不是强调色：强调色和它的洗底同色相，压在一起时
+     字形反而比旁边未选中的行更糊（实测在同一块玻璃上差一档亮度）。
+     选中这件事由「底色」+ 右侧「当前」/✓ 两个信号表达，字要保白。 */
+  color: var(--fs-ink);
+}
+.fs-menu-item:disabled {
+  color: var(--fs-ink-faint);
+  cursor: default;
+}
+/*
+ * 「当前档且不可点」（源只有一档）是常态，不是异常态：整行被 :disabled 洗灰后
+ * 会读成「这一项坏了」，而它恰恰是要被看清的那一行 —— 这里把墨色还回去，
+ * 用 cursor: default + 无 hover 表达「点不动」。
+ */
+.fs-menu-item.active:disabled {
+  color: var(--fs-ink);
+}
+.fs-menu-meta {
+  color: var(--fs-ink-faint);
+  font-size: var(--fs-2xs);
+}
+.fs-menu-item.active .fs-menu-meta {
+  /* 「当前」/码率这串是**解释性**文字，只比正文低一档；用 faint 会掉到 2.6:1 */
+  color: color-mix(in srgb, var(--fs-ink) 72%, transparent);
+}
+
+/* ---- 悬浮提示（P58） ----
+   每个图标 / 胶囊都带 `data-tip`：图标省宽度，提示补语义。
+   自绘而不是用原生 title：原生提示 1s 才出、样式由系统画，在一条玻璃上很出戏。
+   位置默认居中，抬到**条子上沿之外**（--fs-pop-lift，与弹层同一条基准线）：
+   只抬 8px 的话气泡会正压在标题行文字上，看着像布局错位；抬到条外则浮在画面上，
+   与弹层同一层语义。靠右的元素加 `.tip-end` 改成右对齐，避免溢出视口。
+*/
+.fs-icon,
+.fs-chip,
+.fs-act {
+  position: relative;
+}
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + var(--fs-pop-lift, 39px));
+  z-index: 3;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, #fff 12%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, #05070b 90%, transparent);
+  color: var(--fs-ink);
+  font-size: var(--fs-2xs);
+  line-height: 1.35;
+  white-space: nowrap;
+  text-shadow: none;
+  opacity: 0;
+  translate: -50% 2px;
+  pointer-events: none;
+  transition: opacity 120ms var(--ease), translate 120ms var(--ease);
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  translate: -50% 0;
+}
+[data-tip].tip-end::after {
+  left: auto;
+  right: 0;
+  translate: 0 2px;
+}
+[data-tip].tip-end:hover::after,
+[data-tip].tip-end:focus-visible::after {
+  translate: 0 0;
+}
+/* 行首元素：窄屏（条内 padding 收到 12px）下居中的气泡会顶出视口左沿，
+   改成左对齐——气泡左沿与图标左沿齐平，永远不会出界。 */
+[data-tip].tip-start::after {
+  left: 0;
+  translate: 0 2px;
+}
+[data-tip].tip-start:hover::after,
+[data-tip].tip-start:focus-visible::after {
+  translate: 0 0;
+}
+/* 按钮与 .engine-btn 同源（同圆角、同描边），高度跟轨道命中区一致 = 30px。
+   P57：底子从实色 --panel-3 换成半透明白洗 —— 玻璃条上放实色块，看起来像贴了张纸，
+   一挪动条子就会「露馅」；白洗是让按钮浮在这层玻璃上。 */
+.fs-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 30px;
+  min-height: 0;
+  padding: 0 12px;
+  border: 1px solid var(--fs-line-soft);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, #fff 8%, transparent);
+  color: var(--fs-ink-dim);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+  text-shadow: var(--fs-ink-shadow);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
+}
+.fs-act:hover:not(:disabled) {
+  background: color-mix(in srgb, #fff 16%, transparent);
+  border-color: color-mix(in srgb, #fff 28%, transparent);
+  color: var(--fs-ink);
+}
+.fs-act.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-ink);
+}
+/* P58：按钮里的图标。窄屏 ≤1180px 时 `.fs-act-label` 收起，只剩图标 + 数字 */
+.ico-act {
+  display: block;
+  opacity: 0.85;
+}
+.fs-act.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+.fs-act.primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+  border-color: var(--accent-hi);
+}
+.fs-act:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.fs-act-num {
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+.fs-act-hint {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-2xs);
+  opacity: 0.82;
+}
+
+/* ---- 全屏选集面板：浮在控制条上方，内部滚动（页面本身不滚） ---- */
+.fs-panel {
+  position: absolute;
+  right: var(--sp-6);
+  bottom: calc(var(--pf-fs-bar, 72px) + var(--sp-3));
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(52vh, 460px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--panel) 97%, transparent);
+  box-shadow: var(--shadow-3);
+  backdrop-filter: blur(12px);
+  /* 纯浮层容器，不含 <video>，裁剪是安全的（P38 只约束视频区祖先） */
+  overflow: hidden;
+}
+.fs-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex: none;
+  padding: 10px var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+.fs-panel-head h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.fs-panel-count {
+  margin-left: 6px;
+  font-size: var(--fs-2xs);
+  font-weight: 400;
+  color: var(--text-faint);
+}
+.fs-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.fs-icon-btn:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+.fs-panel-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  gap: 5px;
+  padding: var(--sp-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 面板里的集按钮直接复用侧栏的 .ep-btn：.video-wrap 带 force-dark，
+   token 在这里本来就是暗色值，不需要再写一套色值。 */
+.fs-panel-err {
+  flex: none;
+  padding: 0 var(--sp-3) 10px;
+  font-size: var(--fs-2xs);
+  color: var(--danger);
+}
+
+/* 面板出现/消失：轻微上浮，不做缩放（全屏里任何 scale 都会让字发虚） */
+.pf-fs-pop-enter-active,
+.pf-fs-pop-leave-active {
+  transition: opacity var(--t-base) var(--ease), transform var(--t-base) var(--ease);
+}
+.pf-fs-pop-enter-from,
+.pf-fs-pop-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+/* P58：淡出过程中不许再吃点击 —— 一个已经「关掉」的弹层还挡着画面，
+   用户点上去不会有任何反应，看起来像卡死（尤其全屏里点画面本该是暂停）。
+   隐藏窗口/最小化时过渡可能停在中途，这条同时是那种情况的兜底。 */
+.pf-fs-pop-leave-active {
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pf-fs-pop-enter-active,
+  .pf-fs-pop-leave-active {
+    transition: none;
+  }
+}
+
+/* 窄屏全屏：只留控制行（标题让位），按钮收紧。
+   高度必须仍是 --pf-fs-bar（mpv 矩形、弹幕让位都按它算），
+   所以这里不换行、只减内容，宁可丢掉标题也不让控制条变高。 */
+@media (max-width: 1180px) {
+  /* P58 第一档：胶囊去图标只留数值、按钮去文字只留图标。
+     此时固定宽度约 700px，1280 以下的窗口也不会挤在一起。 */
+  .fs-chip {
+    padding: 0 7px;
+  }
+  .fs-chip .ico-chip {
+    display: none;
+  }
+  .fs-act {
+    padding: 0 9px;
+  }
+  .fs-act-label {
+    display: none;
+  }
+  .fs-bar-row {
+    gap: var(--sp-2);
+  }
+  .fs-vol-track {
+    width: 60px;
+  }
+}
+@media (max-width: 900px) {
+  .fs-bar {
+    padding: 0 var(--sp-3);
+    /* 标题行已隐藏，控制行上移到 (72-30)/2 = 21，弹层/提示的基准线跟着下移 10px */
+    --fs-pop-lift: 29px;
+  }
+  .fs-bar-head {
+    display: none;
+  }
+  .fs-bar-row {
+    gap: 6px;
+  }
+  .fs-act {
+    padding: 0 8px;
+  }
+  .fs-act-hint,
+  .fs-act-num {
+    display: none;
+  }
+  /* 窄屏不藏音量：只是把滑杆缩短，音量调节在任何宽度下都必须可用 */
+  .fs-vol-track {
+    width: 52px;
+  }
+  .fs-panel {
+    right: var(--sp-3);
+    left: var(--sp-3);
+    width: auto;
+  }
+  /* 窄屏下「上一集 / 下一集」只留播放键的空间紧张时，图标间距再收一档 */
+  .fs-transport .fs-icon {
+    min-width: 26px;
+    padding: 0 4px;
   }
 }
 </style>

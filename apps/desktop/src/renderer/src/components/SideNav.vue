@@ -1,41 +1,38 @@
 <script setup lang="ts">
 import { usePlayerStore } from '../stores/player'
 import { useThemeStore } from '../stores/theme'
+import { useUpdateStore } from '../stores/update'
 import type { AppRoute } from '../stores/player'
+import brandMark from '../assets/icon.png'
 
 const store = usePlayerStore()
 const theme = useThemeStore()
+const upd = useUpdateStore()
+upd.init()
 
 interface NavItem {
   route: AppRoute
   label: string
   icon: string
 }
-/** 导航按「找片 → 看片 → 留给我的东西 → 系统」分组，10 项平铺时靠分组给层级 */
+/**
+ * 导航三大块：「浏览（看片）→ 工具（搞片源）→ 管理（系统）」。
+ * P52 重排：历史/媒体库归入浏览，任务归入工具，设置/配色归入底部常驻的「管理」块。
+ */
 const groups: { title: string; items: NavItem[] }[] = [
   {
     title: '浏览',
     items: [
       { route: 'home', label: '首页', icon: 'M3 10.6 12 3.4l9 7.2M5.4 9.4V20h4.7v-5.6h3.8V20h4.7V9.4' },
-      {
-        route: 'discover',
-        label: '发现',
-        icon: 'M10.5 3.5a7 7 0 1 0 4.9 12l4.6 4.6 1.4-1.4-4.6-4.6a7 7 0 0 0-6.3-10.6zM10.5 5.5a5 5 0 1 1 0 10 5 5 0 0 1 0-10z'
-      },
-      { route: 'player', label: '播放', icon: 'M8.4 5.2v13.6L19 12 8.4 5.2z' }
-    ]
-  },
-  {
-    title: '我的',
-    items: [
+      { route: 'player', label: '播放', icon: 'M8.4 5.2v13.6L19 12 8.4 5.2z' },
       { route: 'history', label: '历史', icon: 'M12 3.6a8.4 8.4 0 1 1-8.1 10.6M12 7.4V12l3.2 1.9M3.6 5.2v4.2h4.2' },
-      { route: 'library', label: '媒体库', icon: 'M4 5h6.4v5.6H4V5zm9.6 0H20v5.6h-6.4V5zM4 13.4h6.4V19H4v-5.6zm9.6 0H20V19h-6.4v-5.6z' },
-      { route: 'tasks', label: '任务', icon: 'M4.6 6.6h14.8M4.6 12h14.8M4.6 17.4h9.4' }
+      { route: 'library', label: '媒体库', icon: 'M4 5h6.4v5.6H4V5zm9.6 0H20v5.6h-6.4V5zM4 13.4h6.4V19H4v-5.6zm9.6 0H20V19h-6.4v-5.6z' }
     ]
   },
   {
-    title: '片源',
+    title: '工具',
     items: [
+      { route: 'tasks', label: '任务', icon: 'M4.6 6.6h14.8M4.6 12h14.8M4.6 17.4h9.4' },
       {
         route: 'parse',
         label: '解析',
@@ -51,16 +48,8 @@ const groups: { title: string; items: NavItem[] }[] = [
 <template>
   <nav class="nav" aria-label="主导航">
     <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-        <defs>
-          <linearGradient id="pf-brand-grad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#6b93ff" />
-            <stop offset="100%" stop-color="#9a7bff" />
-          </linearGradient>
-        </defs>
-        <rect x="1" y="1" width="30" height="30" rx="9" fill="url(#pf-brand-grad)" />
-        <path d="M13 10.6 22 16l-9 5.4V10.6z" fill="#0b0e14" fill-opacity="0.92" />
-      </svg>
+      <!-- 品牌统一（P53）：直接用与 exe/安装包同源的 icon.png，替换旧的蓝紫渐变内嵌 SVG -->
+      <img class="brand-mark" :src="brandMark" alt="PolyFrame Player" />
       <span class="brand-text">
         <b>PolyFrame</b>
         <i>Player</i>
@@ -99,7 +88,9 @@ const groups: { title: string; items: NavItem[] }[] = [
     </div>
 
     <div class="nav-foot">
-      <!-- P42 顶栏移除后，皮肤切换落到左下角常驻位：图标显示「当前」主题，点击切到另一套 -->
+      <!-- P52：管理块（配色 + 设置）常驻底部，与浏览/工具同款式，不随导航滚动 -->
+      <p class="group-label">管理</p>
+      <!-- 主题切换落在管理块：图标显示「当前」主题，点击切到另一套 -->
       <button
         class="nav-item"
         type="button"
@@ -163,6 +154,8 @@ const groups: { title: string; items: NavItem[] }[] = [
           <circle cx="15.5" cy="17" r="2.2" />
         </svg>
         <span class="nav-label">设置</span>
+        <!-- P50：有新版待处理时，设置入口挂一颗小圆点 -->
+        <i v-if="upd.available" class="upd-dot" aria-label="有可用更新"></i>
       </button>
       <!-- 内核状态：P42 顶栏撤掉后，这里是唯一的状态位 -->
       <div class="nav-status" :class="{ ok: store.online }" :title="store.statusText">
@@ -195,8 +188,9 @@ const groups: { title: string; items: NavItem[] }[] = [
   width: 26px;
   height: 26px;
   flex: none;
-  border-radius: 9px;
-  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 7px;
+  /* logo 本体已是红色胶片盘，投影改用中性暗色，不再跟随蓝紫强调色 */
+  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.4);
 }
 .brand-text {
   display: flex;
@@ -229,7 +223,8 @@ const groups: { title: string; items: NavItem[] }[] = [
 }
 .group-label {
   padding: 0 10px;
-  margin: 10px 0 4px;
+  /* P52：大模块之间拉开间距，块与块的「呼吸感」靠这里 */
+  margin: 16px 0 5px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 1.2px;
@@ -239,13 +234,18 @@ const groups: { title: string; items: NavItem[] }[] = [
 .group-label:first-child {
   margin-top: 2px;
 }
-/* 导航项：左侧 2px 强调条 + 半透明底表达选中，不做整块高亮（避免抢内容区） */
+/* 导航项：左侧 2px 强调条 + 半透明底表达选中，不做整块高亮（避免抢内容区）。
+   P52b：缩进收敛到 3px —— 只留一点对齐错位感，不再让左侧空出一大截。
+   P52c：必须显式声明 justify-content —— 全局 button 规则带 center，
+   不钉死的话图标+文字会在行内「居中漂浮」，与贴左的分组标题错位 */
 .nav-item {
   position: relative;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
-  width: 100%;
+  width: calc(100% - 3px);
+  margin-left: 3px;
   min-height: 34px;
   padding: 0 10px;
   margin-bottom: 1px;
@@ -297,9 +297,18 @@ const groups: { title: string; items: NavItem[] }[] = [
 }
 .nav-foot {
   flex: none;
-  padding-top: 6px;
+  padding-top: 4px;
   border-top: 1px solid var(--line);
-  margin-top: 6px;
+  margin-top: 8px;
+}
+/* 管理块里的主题/设置按钮：与滚动区同款缩进，同样钉死左对齐 */
+.nav-foot .nav-item {
+  width: calc(100% - 3px);
+  margin-left: 3px;
+  justify-content: flex-start;
+}
+.nav-foot .group-label {
+  margin-top: 2px;
 }
 .nav-status {
   display: flex;
@@ -308,6 +317,18 @@ const groups: { title: string; items: NavItem[] }[] = [
   padding: 6px 10px 0;
   font-size: 11px;
   color: var(--text-faint);
+}
+/* P50：更新红点 —— 图标轨模式下也能看见 */
+.upd-dot {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+  pointer-events: none;
 }
 .dot {
   width: 6px;
@@ -354,8 +375,15 @@ const groups: { title: string; items: NavItem[] }[] = [
   .nav-item {
     justify-content: center;
     gap: 0;
+    /* 图标轨下取消缩进：居中展示 */
+    width: 100%;
+    margin-left: 0;
     min-height: 40px;
     padding: 0;
+  }
+  .nav-foot .nav-item {
+    width: 100%;
+    margin-left: 0;
   }
   .nav-label {
     display: none;

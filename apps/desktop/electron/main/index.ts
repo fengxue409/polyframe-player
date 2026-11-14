@@ -6,6 +6,7 @@ import { initDiag, logPathOf, write as diag } from './diag'
 import { closeParseWindows, openParseWindow, sniffMediaUrl } from './sniff'
 import { closeDanmakuOverlay, getDanmakuOverlay, registerOverlayIpc } from './overlay'
 import { MIN_HEIGHT, MIN_WIDTH, loadWindowState, trackWindowState } from './window-state'
+import { updater, bindUpdaterBroadcast, type UpdateConfig } from './updater'
 
 // P10：嗅探窗口要在无用户手势下自动起播（否则播放器不请求 manifest）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -58,9 +59,17 @@ function registerIpc(): void {
     shell.showItemInFolder(p)
     return true
   })
-  ipcMain.handle('pf:rpc', (_e, payload: { method: string; params?: unknown }) =>
-    core.request(payload.method, payload.params, SLOW_RPC_TIMEOUT[payload.method])
-  )
+  // P45：handler 裸调 core.request 时，超时/socket 错误会以未捕获异常逃出
+  // ipcMain.handle（Electron 打「Error occurred in handler for 'pf:rpc'」，
+  // 非 Error 值还会被序列化吞掉）。统一 catch 后 rethrow 规范化的 Error：
+  // 渲染层收到的仍是 Promise rejection，catch 语义完全不变。
+  ipcMain.handle('pf:rpc', async (_e, payload: { method: string; params?: unknown }) => {
+    try {
+      return await core.request(payload.method, payload.params, SLOW_RPC_TIMEOUT[payload.method])
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : String(err))
+    }
+  })
   // P3：主窗口 HWND（Buffer 为小端 u64）→ 10 进制数字，供 mpv.attach 子窗口嵌入
   ipcMain.handle('pf:native-hwnd', () => {
     if (!mainWindow) return 0
@@ -116,6 +125,23 @@ function registerIpc(): void {
   ipcMain.handle('pf:parse-open-window', (_e, url: string) => openParseWindow(url))
   // P17 弹幕覆盖层：窗口命令就地消化，数据命令转发覆盖层渲染页
   registerOverlayIpc(() => mainWindow)
+
+  // P50 应用更新：检查 / 下载 / 一键升级 / 配置 / 历史版本回退
+  ipcMain.handle('pf:update-state', () => updater.getState())
+  ipcMain.handle('pf:update-check', () => updater.check('ui'))
+  ipcMain.handle('pf:update-download', () => updater.download('ui'))
+  ipcMain.handle('pf:update-install', () => updater.install())
+  ipcMain.handle('pf:update-config', (_e, patch: Partial<UpdateConfig>) => updater.setConfig(patch ?? {}))
+  ipcMain.handle('pf:update-history', () => updater.listHistory())
+  ipcMain.handle('pf:update-install-version', (_e, tag: string) =>
+    updater.installVersion(String(tag ?? '').trim())
+  )
+  ipcMain.handle('pf:update-test-channels', () => updater.testChannels())
+  ipcMain.handle('pf:update-restore-backup', () => updater.restoreBackup())
+  ipcMain.handle('pf:update-open-dir', () => {
+    updater.openUpdatesDir()
+    return true
+  })
 }
 
 function createWindow(): void {
@@ -128,6 +154,10 @@ function createWindow(): void {
     title: 'PolyFrame Player',
     backgroundColor: '#0b0e14',
     autoHideMenuBar: true,
+    // 窗口/任务栏图标：开发态取 build/icon.ico；打包后 Windows 直接用 exe 内嵌图标
+    icon: existsSync(path.join(app.getAppPath(), 'build/icon.ico'))
+      ? path.join(app.getAppPath(), 'build/icon.ico')
+      : undefined,
     // 先不显示：最大化要赶在首帧之前生效，否则会先闪一下普通尺寸的窗口
     show: false,
     webPreferences: {
@@ -194,6 +224,9 @@ app.whenReady().then(async () => {
   if (p) console.error(`[diag] log file: ${p}`)
   registerIpc()
   createWindow()
+  // P50：广播目标跟着主窗口走；启动 10s 后首查新版本，此后按配置间隔定期查
+  bindUpdaterBroadcast(() => (mainWindow && !mainWindow.isDestroyed() ? [mainWindow] : []))
+  updater.init()
   await core.start(locateCoreBin())
 })
 
@@ -205,6 +238,7 @@ app.on('child-process-gone', (_e, d) =>
 app.on('window-all-closed', () => {
   closeParseWindows()
   closeDanmakuOverlay()
+  updater.dispose()
   core.stop()
   app.quit()
 })

@@ -5,11 +5,97 @@ import { usePlayerStore } from '../stores/player'
 import { useCatalogStore } from '../stores/catalog'
 import { useDanmakuStore } from '../stores/danmaku'
 import { useThemeStore } from '../stores/theme'
+import { useUpdateStore } from '../stores/update'
+import type { UpdatePhase } from '../types'
 
 const store = usePlayerStore()
 const catalog = useCatalogStore()
 const dm = useDanmakuStore()
 const theme = useThemeStore()
+const upd = useUpdateStore()
+upd.init()
+
+// ---- P50 软件更新 ----
+const repoDraft = ref('')
+const extraDraft = ref('')
+const historyOpen = ref(false)
+
+watch(
+  () => upd.st.config.repo,
+  (v) => {
+    if (repoDraft.value !== v) repoDraft.value = v
+  },
+  { immediate: true }
+)
+watch(
+  () => upd.st.config.extraChannels,
+  (list) => {
+    const text = (list ?? []).join('\n')
+    if (extraDraft.value !== text) extraDraft.value = text
+  },
+  { immediate: true }
+)
+
+function onSaveUpdateSource(): void {
+  const repo = repoDraft.value.trim()
+  const extraChannels = extraDraft.value
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  void upd
+    .setConfig({ repo, extraChannels })
+    .then(() => notify('更新源已保存'))
+    .catch((e) => notify((e as Error).message))
+}
+
+function onUpdBool(key: 'enabled' | 'autoDownload', ev: Event): void {
+  const v = (ev.target as HTMLInputElement).checked
+  void upd.setConfig({ [key]: v })
+}
+
+function onUpdInterval(ev: Event): void {
+  const v = Number((ev.target as HTMLSelectElement).value)
+  if (Number.isFinite(v)) void upd.setConfig({ intervalHours: v })
+}
+
+const PHASE_TEXT: Record<UpdatePhase, string> = {
+  idle: '尚未检查',
+  checking: '正在检查…',
+  uptodate: '已是最新版本',
+  available: '发现新版本',
+  downloading: '正在下载升级包…',
+  downloaded: '升级包已就绪',
+  applying: '正在应用升级，应用即将重启…',
+  error: '更新出错'
+}
+
+function fmtSpeed(b: number): string {
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB/s`
+  return `${Math.max(1, Math.round(b / 1024))} KB/s`
+}
+
+function fmtDate(iso: string): string {
+  return iso ? iso.slice(0, 10) : '—'
+}
+
+async function onOpenHistory(): Promise<void> {
+  historyOpen.value = !historyOpen.value
+  if (historyOpen.value && !upd.st.history.length) {
+    try {
+      await upd.loadHistory()
+    } catch (e) {
+      notify((e as Error).message)
+    }
+  }
+}
+
+async function onTestChannels(): Promise<void> {
+  try {
+    await upd.testChannels()
+  } catch (e) {
+    notify((e as Error).message)
+  }
+}
 
 // ---- P11 弹幕设置 ----
 const dmAppId = ref('')
@@ -667,6 +753,163 @@ async function onProbeAll(): Promise<void> {
       </section>
     </div>
 
+    <!-- P50 软件更新 -->
+    <p class="group-title">软件更新</p>
+    <section class="card upd">
+      <h3>版本与升级</h3>
+      <div class="upd-row">
+        <span class="k">当前版本</span>
+        <span class="mono">v{{ upd.st.currentVersion || '—' }}</span>
+        <span class="badge form-badge">{{ upd.formLabel }}</span>
+        <span v-if="upd.st.latest" class="dim small">最新 v{{ upd.st.latest.tag }} · {{ fmtDate(upd.st.latest.publishedAt) }}</span>
+        <span v-if="upd.st.channel" class="dim small">通道 {{ upd.st.channel }}</span>
+      </div>
+
+      <div class="upd-status" :class="{ bad: upd.st.phase === 'error' }">
+        <span class="phase">{{ PHASE_TEXT[upd.st.phase] }}</span>
+        <span v-if="upd.st.error" class="err">{{ upd.st.error }}</span>
+      </div>
+
+      <!-- 下载进度条 -->
+      <div v-if="upd.st.phase === 'downloading' && upd.st.progress" class="upd-progress">
+        <div class="bar"><div class="fill" :style="{ width: upd.pct >= 0 ? `${(upd.pct * 100).toFixed(1)}%` : '50%' }"></div></div>
+        <span class="mono small">
+          {{ upd.pct >= 0 ? `${(upd.pct * 100).toFixed(0)}%` : '' }}
+          {{ (upd.st.progress.received / 1048576).toFixed(1) }}/{{ upd.st.progress.total ? (upd.st.progress.total / 1048576).toFixed(1) + ' MB' : '—' }}
+          · {{ fmtSpeed(upd.st.progress.speed) }}
+        </span>
+      </div>
+
+      <details v-if="upd.st.latest && (upd.st.phase === 'available' || upd.st.phase === 'downloaded') && upd.st.latest.notes" class="upd-notes">
+        <summary>查看更新说明</summary>
+        <pre class="notes-body">{{ upd.st.latest.notes }}</pre>
+      </details>
+
+      <div class="btn-row">
+        <button class="mini" :disabled="upd.st.phase === 'checking' || upd.downloading" @click="upd.check()">
+          {{ upd.st.phase === 'checking' ? '检查中…' : '检查更新' }}
+        </button>
+        <button v-if="upd.st.phase === 'available'" class="mini" @click="upd.download()">下载升级包</button>
+        <button
+          v-if="upd.st.phase === 'downloaded'"
+          class="mini primary"
+          @click="upd.install()"
+        >
+          一键升级到 v{{ upd.st.pkg?.tag }}
+        </button>
+        <button v-if="upd.st.phase === 'error'" class="mini" @click="upd.st.error.includes('下载') ? upd.download() : upd.check()">
+          重试
+        </button>
+        <button v-if="upd.st.pkg" class="mini" @click="upd.openDir()">打开缓存目录</button>
+        <button v-if="upd.st.backupAvailable" class="mini danger" @click="upd.restoreBackup()">还原上一版</button>
+      </div>
+      <p v-if="upd.st.pkg" class="note foot">
+        就绪包：{{ upd.st.pkg.name }}<span v-if="upd.st.pkg.shaVerified">（SHA256 已校验）</span>
+      </p>
+      <p v-else class="note foot">
+        {{ upd.formLabel === '便携版'
+          ? '便携版升级 = 替换 exe 本体并自动重启，旧版保留为 *.pfold 可一键还原；配置与缓存在 %LOCALAPPDATA%/PolyFrame，升级不丢。'
+          : '安装版升级 = 静默重装（沿用原安装目录）后自动拉起新版；用户数据在 %LOCALAPPDATA%/PolyFrame，升级不丢。' }}
+      </p>
+
+      <h4 class="sub-title">自动检查</h4>
+      <div class="upd-grid">
+        <label class="dm-switch">
+          <input type="checkbox" :checked="upd.st.config.enabled" @change="onUpdBool('enabled', $event)" />
+          <span>启动与定期自动检查</span>
+        </label>
+        <label class="dm-switch">
+          <input type="checkbox" :checked="upd.st.config.autoDownload" @change="onUpdBool('autoDownload', $event)" />
+          <span>发现新版后自动下载升级包</span>
+        </label>
+        <div class="kv">
+          <span class="k">检查间隔</span>
+          <select class="mode-select" :value="upd.st.config.intervalHours" @change="onUpdInterval">
+            <option :value="1">每小时</option>
+            <option :value="3">每 3 小时</option>
+            <option :value="6">每 6 小时</option>
+            <option :value="12">每 12 小时</option>
+            <option :value="24">每天</option>
+            <option :value="72">每 3 天</option>
+          </select>
+        </div>
+      </div>
+
+      <h4 class="sub-title">更新源与代理通道</h4>
+      <p class="note">
+        更新源为 GitHub Releases；直连不通时按下方通道逐个降级（镜像前缀 + 完整 GitHub URL），
+        成功的通道会被记住、下次优先使用。
+      </p>
+      <div class="upd-src">
+        <input v-model="repoDraft" class="w-repo mono" placeholder="owner/repo（GitHub 仓库）" spellcheck="false" />
+        <button class="mini" @click="onSaveUpdateSource">保存更新源</button>
+        <button class="mini" :disabled="upd.probing" @click="onTestChannels">
+          {{ upd.probing ? '探测中…' : '测试通道' }}
+        </button>
+      </div>
+      <textarea
+        v-model="extraDraft"
+        class="w-desc upd-extra"
+        rows="2"
+        spellcheck="false"
+        placeholder="自定义镜像前缀，每行一个，如 https://my-mirror.example/（留空只用内置通道）"
+        @blur="onSaveUpdateSource"
+      ></textarea>
+      <div v-if="upd.probes.length" class="table-wrap mt-3">
+        <table>
+          <thead>
+            <tr>
+              <th>通道</th>
+              <th>前缀</th>
+              <th>延迟</th>
+              <th>结果</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in upd.probes" :key="p.id">
+              <td class="mono">{{ p.id }}</td>
+              <td class="mono dim small">{{ p.prefix || '（直连）' }}</td>
+              <td class="mono">{{ p.ok ? `${p.ms}ms` : '—' }}</td>
+              <td :class="p.ok ? 'good-text' : 'bad-text'">{{ p.ok ? '可用' : p.error ?? '不可用' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 class="sub-title">历史版本（回退）</h4>
+      <div class="btn-row tight-top">
+        <button class="mini" :disabled="upd.historyLoading" @click="onOpenHistory">
+          {{ upd.historyLoading ? '加载中…' : historyOpen ? '收起' : '展开历史版本' }}
+        </button>
+      </div>
+      <div v-if="historyOpen" class="table-wrap mt-3">
+        <table>
+          <thead>
+            <tr>
+              <th>版本</th>
+              <th>发布时间</th>
+              <th class="col-ops">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in upd.st.history" :key="r.tag">
+              <td class="mono">{{ r.tag }}<span v-if="r.tag === `v${upd.st.currentVersion}`" class="badge builtin-tag">当前</span></td>
+              <td class="mono">{{ fmtDate(r.publishedAt) }}</td>
+              <td class="col-ops">
+                <button class="mini danger" @click="upd.installVersion(r.tag)">下载并安装</button>
+              </td>
+            </tr>
+            <tr v-if="!upd.st.history.length">
+              <td colspan="3" class="dim small">没有可回退的版本（或加载失败）</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note foot">
+        回退会把所选历史版本的{{ upd.formLabel === '便携版' ? '便携包替换当前程序' : '安装包静默重装' }}，用户数据不受影响。
+      </p>
+    </section>
+
     <!-- 发现源站（P7） -->
     <p class="group-title">内容源</p>
     <section class="card">
@@ -894,7 +1137,7 @@ async function onProbeAll(): Promise<void> {
     <section class="card about">
       <h3>关于</h3>
       <p class="dim small">
-        PolyFrame Player v0.1 · Windows 桌面端多源视频播放器 —— 多镜像带宽聚合（P2SP）+ 分片级缓存与预取 + 双播放内核（hls.js / libmpv）。
+        PolyFrame Player v{{ upd.st.currentVersion || '0.1' }} · Windows 桌面端多源视频播放器 —— 多镜像带宽聚合（P2SP）+ 分片级缓存与预取 + 双播放内核（hls.js / libmpv）。
         本地 HTTP 代理是下载与播放的唯一边界（Stremio 模式），播放器只见 127.0.0.1 地址。
       </p>
       <div class="about-row">
@@ -1050,6 +1293,120 @@ async function onProbeAll(): Promise<void> {
     flex-wrap: wrap;
   }
 }
+/* ---- P50 软件更新 ---- */
+.upd-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px var(--sp-4);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.upd-row .k {
+  color: var(--text-faint);
+}
+.form-badge {
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--fs-2xs);
+}
+.upd-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.upd-status .phase {
+  font-weight: 600;
+  color: var(--text);
+}
+.upd-status.bad .phase {
+  color: var(--danger);
+}
+.upd-status .err {
+  font-size: var(--fs-2xs);
+  color: var(--danger);
+  word-break: break-word;
+}
+.upd-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+.upd-progress .bar {
+  flex: 1;
+  min-width: 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.upd-progress .fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.4s var(--ease);
+}
+.upd-notes {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+}
+.upd-notes summary {
+  cursor: pointer;
+  user-select: none;
+}
+.notes-body {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  font-family: inherit;
+  font-size: var(--fs-2xs);
+  line-height: 1.7;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.upd-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+}
+.upd-src {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.upd-src .w-repo {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.upd-extra {
+  width: 100%;
+  margin-top: var(--sp-2);
+  min-height: 52px;
+  font-size: var(--fs-xs);
+  font-family: var(--mono, monospace);
+}
+.good-text {
+  color: var(--ok);
+}
+.bad-text {
+  color: var(--danger);
+  word-break: break-word;
+}
+
 /* 源站表：固定列宽的可滚动区，窄屏横向滚动而不撑破页面 */
 .table-wrap table {
   min-width: 520px;

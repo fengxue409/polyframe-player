@@ -135,7 +135,12 @@ function toggleExpand(t: MagnetTask): void {
         <li v-for="t in ms.tasks" :key="t.id" class="task">
           <div class="task-main">
             <div class="task-head">
-              <span class="task-name" :title="t.name">{{ t.name || t.infoHash || '（未命名）' }}</span>
+              <!-- 元数据未到手时别把裸 infohash 顶到标题位（像乱码）：待元数据态给友好占位 -->
+            <span
+              class="task-name"
+              :class="{ pending: !t.name }"
+              :title="t.name || t.infoHash"
+            >{{ t.name || (t.status === 'adding' ? '正在解析元数据…' : t.infoHash || '（未命名）') }}</span>
               <span class="badge" :class="badgeOf(t)">{{ statusText(t) }}</span>
             </div>
             <div class="task-bar">
@@ -348,6 +353,10 @@ function toggleExpand(t: MagnetTask): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 元数据未到手：占位文案降一档，别和真标题抢注意力 */
+.task-name.pending {
+  color: var(--text-faint);
 }
 .task-bar {
   display: flex;

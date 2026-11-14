@@ -1,6 +1,6 @@
 {
   "name": "@polyframe/desktop",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "private": true,
   "description": "PolyFrame Player 桌面端（Electron + Vue3 + Pinia）",
   "main": "./out/main/index.js",
@@ -9,7 +9,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && vue-tsc --noEmit -p tsconfig.web.json --composite false",
-    "dist": "electron-vite build && electron-builder --win --x64"
+    "dist": "node scripts/dist.mjs",
+    "dist:dry": "node scripts/dist.mjs --dry-run",
+    "ensure:release": "node scripts/ensure-release-dir.mjs"
   },
   "build": {
     "appId": "com.polyframe.player",

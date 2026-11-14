@@ -45,8 +45,87 @@ declare global {
       diagPath?(): Promise<string>
       /** P37 诊断：资源管理器定位日志文件 */
       openLog?(): Promise<boolean>
+      // ---- P50 应用更新 ----
+      updateState?(): Promise<UpdateState>
+      updateCheck?(): Promise<UpdateState>
+      updateDownload?(): Promise<UpdateState>
+      updateInstall?(): Promise<UpdateState>
+      updateSetConfig?(patch: Partial<UpdateConfig>): Promise<UpdateState>
+      updateHistory?(): Promise<ReleaseInfo[]>
+      updateInstallVersion?(tag: string): Promise<UpdateState>
+      updateTestChannels?(): Promise<ChannelProbe[]>
+      updateRestoreBackup?(): Promise<UpdateState>
+      updateOpenDir?(): Promise<boolean>
+      onUpdateState?(cb: (st: UpdateState) => void): () => void
     }
   }
+}
+
+/** ---- P50 应用更新（与主进程 updater.ts 同构） ---- */
+
+export type UpdateForm = 'installer' | 'portable' | 'dev'
+
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'uptodate'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'applying'
+  | 'error'
+
+export interface UpdateConfig {
+  enabled: boolean
+  autoDownload: boolean
+  intervalHours: number
+  repo: string
+  extraChannels: string[]
+  disabledChannels: string[]
+  lastGoodChannel: string
+}
+
+export interface ReleaseInfo {
+  tag: string
+  name: string
+  notes: string
+  publishedAt: string
+  url: string
+}
+
+export interface UpdateProgress {
+  received: number
+  total: number
+  speed: number
+}
+
+export interface UpdatePkg {
+  path: string
+  tag: string
+  name: string
+  shaVerified: boolean
+}
+
+export interface UpdateState {
+  phase: UpdatePhase
+  form: UpdateForm
+  currentVersion: string
+  config: UpdateConfig
+  latest: ReleaseInfo | null
+  history: ReleaseInfo[]
+  progress: UpdateProgress | null
+  pkg: UpdatePkg | null
+  backupAvailable: boolean
+  channel: string
+  error: string
+}
+
+export interface ChannelProbe {
+  id: string
+  prefix: string
+  ok: boolean
+  ms: number
+  error?: string
 }
 
 export {}

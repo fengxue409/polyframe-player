@@ -116,8 +116,22 @@ app.whenReady().then(async () => {
   meta.actual = await win.webContents.executeJavaScript('({ w: innerWidth, h: innerHeight })')
   for (const route of cfg.routes) {
     const label = cfg.labels[route]
+    // P53：发现已并入首页 —— nav 里没有「发现」时，先点首页 nav 再点 view-seg 里的同名 tab
     const clicked = await win.webContents.executeJavaScript(
-      \`(() => { const b = [...document.querySelectorAll('.nav-item')].find(x => (x.getAttribute('title')||'').trim() === \${JSON.stringify(label)}); if (b) b.click(); return !!b })()\`
+      \`(() => {
+        const label = \${JSON.stringify(label)};
+        const nav = [...document.querySelectorAll('.nav-item')];
+        const b = nav.find(x => (x.getAttribute('title')||'').trim() === label);
+        if (b) { b.click(); return 'nav' }
+        const tab = [...document.querySelectorAll('.view-seg button')].find(x => (x.textContent||'').trim() === label);
+        if (tab) {
+          const home = nav.find(x => (x.getAttribute('title')||'').trim() === '首页');
+          if (home) home.click();
+          tab.click();
+          return 'tab'
+        }
+        return false
+      })()\`
     ).catch(() => false)
     await new Promise((r) => setTimeout(r, cfg.wait))
     // 强制两帧：隐藏窗口下 capturePage 容易拿到上一帧（切页后会串页）

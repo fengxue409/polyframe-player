@@ -1128,12 +1128,12 @@ const playingEpisodeUrl = computed(() => player.url)
   top: 6px;
   left: 6px;
   background: rgb(6 9 14 / 0.72);
-  color: #e9d27a;
+  color: var(--gold);
   border: 1px solid rgb(255 255 255 / 0.1);
   backdrop-filter: blur(4px);
 }
 .badge.heat.rating-badge {
-  color: #ffd75e;
+  color: var(--gold);
 }
 .badge.builtin {
   margin-left: 6px;

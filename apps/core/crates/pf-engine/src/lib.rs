@@ -1797,58 +1797,82 @@ impl TaskManager {
             },
             None => cache_mode,
         };
-        let _task = self
-            .upsert_task_row(
-                &id,
-                url,
-                title,
-                cache_mode,
-                &created_at,
-                proto,
-                TaskStatus::Probing,
-                proxy,
-            )
-            .await?;
-        if existing.is_some() {
-            self.log("info", format!("任务复用既有缓存，续传中：{id}"))
-                .await;
-        }
+        // F4：create_task 整体 deadline。probe_and_start 里 extract_fallback 的
+        // 页面扫描 + yt-dlp 最坏可超 Electron 侧 task.create 的 75s 超时线
+        // （SLOW_RPC_TIMEOUT），届时真实原因被掐成「RPC 超时」。这里 70s
+        // （严格 < 75s）主动收口：标 Failed 并返回可读错误。
+        let inner_id = id.clone();
+        let task_fut = async move {
+            let _task = self
+                .upsert_task_row(
+                    &inner_id,
+                    url,
+                    title,
+                    cache_mode,
+                    &created_at,
+                    proto,
+                    TaskStatus::Probing,
+                    proxy,
+                )
+                .await?;
+            if existing.is_some() {
+                self.log("info", format!("任务复用既有缓存，续传中：{inner_id}"))
+                    .await;
+            }
 
-        if let Err(e) = self.probe_and_start(id.clone(), urls).await {
-            // 标记失败：任务列表不再停留在 probing，重启恢复也不会误续传
-            let _ = self.store.set_task_status(&id, TaskStatus::Failed.as_str());
-            if let Some(t) = self.tasks.lock().await.get_mut(&id) {
-                t.status = TaskStatus::Failed;
+            if let Err(e) = self.probe_and_start(inner_id.clone(), urls).await {
+                // 标记失败：任务列表不再停留在 probing，重启恢复也不会误续传
+                let _ = self.store.set_task_status(&inner_id, TaskStatus::Failed.as_str());
+                if let Some(t) = self.tasks.lock().await.get_mut(&inner_id) {
+                    t.status = TaskStatus::Failed;
+                }
+                self.probe_errors.lock().await.remove(&inner_id);
+                self.log("error", format!("任务创建失败：{inner_id} ({e})")).await;
+                return Err(e);
             }
-            self.probe_errors.lock().await.remove(&id);
-            self.log("error", format!("任务创建失败：{id} ({e})")).await;
-            return Err(e);
-        }
-        // 等 playlist 就绪再返回（若探测被去重，等待在途解析完成），
-        // 保证 RPC 返回的 playUrl 立即可播。去重期间在途解析若失败，
-        // 凭 probe_errors 立即返回真实错误，而非空转到超时。
-        // deadline 覆盖 fetch_text 最坏重试链（3×10s + 退避 ≈ 32s）。
-        let deadline = Instant::now() + Duration::from_secs(35);
-        loop {
-            if self.media.lock().await.contains_key(&id) {
-                self.probe_errors.lock().await.remove(&id);
-                break;
+            // 等 playlist 就绪再返回（若探测被去重，等待在途解析完成），
+            // 保证 RPC 返回的 playUrl 立即可播。去重期间在途解析若失败，
+            // 凭 probe_errors 立即返回真实错误，而非空转到超时。
+            // deadline 覆盖 fetch_text 最坏重试链（3×10s + 退避 ≈ 32s）。
+            let deadline = Instant::now() + Duration::from_secs(35);
+            loop {
+                if self.media.lock().await.contains_key(&inner_id) {
+                    self.probe_errors.lock().await.remove(&inner_id);
+                    break;
+                }
+                if let Some(e) = self.probe_errors.lock().await.remove(&inner_id) {
+                    let _ = self.store.set_task_status(&inner_id, TaskStatus::Failed.as_str());
+                    if let Some(t) = self.tasks.lock().await.get_mut(&inner_id) {
+                        t.status = TaskStatus::Failed;
+                    }
+                    self.log("error", format!("任务创建失败（在途解析）：{inner_id} ({e})")).await;
+                    return Err(e);
+                }
+                if Instant::now() > deadline {
+                    return Err("等待 playlist 就绪超时（源站无响应或过慢）".into());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if let Some(e) = self.probe_errors.lock().await.remove(&id) {
+            self.tasks
+                .lock()
+                .await
+                .get(&inner_id)
+                .cloned()
+                .ok_or_else(|| "任务不存在".to_string())
+        };
+        match tokio::time::timeout(Duration::from_secs(70), task_fut).await {
+            Ok(r) => r,
+            Err(_) => {
+                // 标记失败：任务列表不再停留在 probing，重启恢复也不会误续传
                 let _ = self.store.set_task_status(&id, TaskStatus::Failed.as_str());
                 if let Some(t) = self.tasks.lock().await.get_mut(&id) {
                     t.status = TaskStatus::Failed;
                 }
-                self.log("error", format!("任务创建失败（在途解析）：{id} ({e})")).await;
-                return Err(e);
+                self.probe_errors.lock().await.remove(&id);
+                self.log("error", format!("任务创建失败（探测超时）：{id}")).await;
+                Err("源站无响应（探测超时）".into())
             }
-            if Instant::now() > deadline {
-                return Err("等待 playlist 就绪超时（源站无响应或过慢）".into());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let tasks = self.tasks.lock().await;
-        Ok(tasks[&id].clone())
     }
 
     /// 任务快照列表（进度字段从 segments 表实时聚合）
@@ -2174,12 +2198,36 @@ impl TaskManager {
     /// P6：MP4 任务走 IDM 动态分段（对半分认领 + 在途窃取），HLS 照旧逐片取件。
     async fn download_job(self: Arc<Self>, task_id: String, stop: Arc<AtomicBool>) {
         let job_start = Instant::now();
-        // 分片表（seq → Segment）+ 待下载集合
+        // 分片表（seq → Segment）+ 待下载集合。
+        // R2：media 缺失 / 无 track 的早退也必须摘掉自己的 job_stops 条目
+        // （core 重启后 restore_from_db 只建 tasks 不建 media，把 online 任务
+        // 切 stream/precache 档即可触达），否则残留的 stop=false 幽灵条目让
+        // resume 假成功、清理器永久保护。按值 retain 摘除，与 finish_job 同款，
+        // 不误删窗口内新起的 job 条目。
         let segs_map: BTreeMap<u64, Segment> = {
             let media = self.media.lock().await;
-            let Some(ss) = media.get(&task_id) else { return };
-            let Some(track) = ss.primary.tracks.first() else { return };
-            track.segments.iter().map(|s| (s.seq, s.clone())).collect()
+            let segs = media
+                .get(&task_id)
+                .and_then(|ss| ss.primary.tracks.first())
+                .map(|track| {
+                    track
+                        .segments
+                        .iter()
+                        .map(|s| (s.seq, s.clone()))
+                        .collect::<BTreeMap<u64, Segment>>()
+                });
+            match segs {
+                Some(m) => m,
+                None => {
+                    drop(media);
+                    self.log("warn", format!("任务 {task_id} 无可下载分片（media 缺失或无轨道），job 退出")).await;
+                    self.job_stops
+                        .lock()
+                        .await
+                        .retain(|_, f| !Arc::ptr_eq(f, &stop));
+                    return;
+                }
+            }
         };
         let live = {
             let media = self.media.lock().await;
@@ -2216,7 +2264,7 @@ impl TaskManager {
             claims: Mutex::new(Vec::new()),
         });
         if sched.todo.lock().unwrap_or_else(|p| p.into_inner()).is_empty() {
-            self.finish_job(&task_id, job_start).await;
+            self.finish_job(&task_id, job_start, stop.clone()).await;
             return;
         }
 
@@ -2417,12 +2465,15 @@ impl TaskManager {
             let _ = w.await;
         }
         ticker.abort();
-        self.finish_job(&task_id, job_start).await;
+        self.finish_job(&task_id, job_start, stop.clone()).await;
     }
 
     /// 任务收尾：有失败分片 → 记录告警；终态 ready；
-    /// 全量完成 → 记 finished_at 并起算播完 TTL（DESIGN §4.6）
-    async fn finish_job(&self, task_id: &str, job_start: Instant) {
+    /// 全量完成 → 记 finished_at 并起算播完 TTL（DESIGN §4.6）。
+    /// `stop` 是本 job 自己的停止标志：摘除 job_stops 必须按值（Arc::ptr_eq）
+    /// 而非按 key——pause 700ms 窗口内用户 resume 会插入新条目并起新 job，
+    /// 旧 job 滞后数秒收尾时按 key remove 会把新 job 的停止位一起摘掉。
+    async fn finish_job(&self, task_id: &str, job_start: Instant, stop: Arc<AtomicBool>) {
         let (done, total, bytes) = self.store.progress(task_id);
         let failed = self.store.count_failed(task_id);
         let all_done = total > 0 && done == total;
@@ -2469,6 +2520,14 @@ impl TaskManager {
         )
         .await;
         self.emit(task_id, status, None).await;
+        // F3：job 收尾即摘除 job_stops 条目——否则 job_running() 对该任务永真：
+        // 清理器把跑过 job 的任务永久保护（容量 LRU 失效），resume/activate
+        // 也会误判「job 已在途」而假成功（界面停在「下载中」却永无下载）。
+        // 按值摘除（只删自己的标志），不动窗口内 resume 新插入的条目。
+        self.job_stops
+            .lock()
+            .await
+            .retain(|_, f| !Arc::ptr_eq(f, &stop));
     }
 
     // ---------- P6 合并导出（DESIGN §4.6：任务完成可选合并导出） ----------
@@ -2627,13 +2686,15 @@ impl TaskManager {
 
     // ---------- P2.5 三档模式运行时（DESIGN §4.6） ----------
 
-    /// 启动下载 job（登记停止标志；重复启动受在途标志保护）
-    async fn spawn_download_job(self: &Arc<Self>, task_id: String) {
+    /// 启动下载 job（登记停止标志；重复启动受在途标志保护）。
+    /// 返回是否真的起了 job：已有在途 job 时去重早退返回 false，
+    /// 调用方（activate/resume）据此不改写状态为「下载中」。
+    async fn spawn_download_job(self: &Arc<Self>, task_id: String) -> bool {
         {
             let stops = self.job_stops.lock().await;
             if let Some(f) = stops.get(&task_id) {
                 if !f.load(Ordering::Relaxed) {
-                    return; // 已有在途 job
+                    return false; // 已有在途 job
                 }
             }
         }
@@ -2643,6 +2704,7 @@ impl TaskManager {
             .await
             .insert(task_id.clone(), stop.clone());
         tokio::spawn(TaskManager::download_job(self.clone(), task_id, stop));
+        true
     }
 
     /// 协同停止下载 job（worker/ticker 每轮检查标志，自然收尾）
@@ -2722,8 +2784,12 @@ impl TaskManager {
             self.log("info", format!("任务 {task_id} → {}（job 在跑，继续）", mode.as_str())).await;
         }
         self.emit(task_id, next, None).await;
-        let tasks = self.tasks.lock().await;
-        Ok(tasks[task_id].clone())
+        self.tasks
+            .lock()
+            .await
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| "任务不存在".to_string())
     }
 
     /// 某任务是否有下载 job 在跑（`job_stops` 里 stop=false 即未收尾）
@@ -2750,8 +2816,12 @@ impl TaskManager {
         self.store.set_task_status(task_id, TaskStatus::Paused.as_str());
         self.log("info", format!("任务 {task_id} 已暂停下载")).await;
         self.emit(task_id, TaskStatus::Paused, None).await;
-        let tasks = self.tasks.lock().await;
-        Ok(tasks[task_id].clone())
+        self.tasks
+            .lock()
+            .await
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| "任务不存在".to_string())
     }
 
     /// 恢复任务下载（P5 RPC task.resume）：复用剧集队列激活管线——
@@ -2781,8 +2851,12 @@ impl TaskManager {
                 .unwrap_or(TaskStatus::Ready);
             self.emit(task_id, status, None).await;
         }
-        let tasks = self.tasks.lock().await;
-        Ok(tasks[task_id].clone())
+        self.tasks
+            .lock()
+            .await
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| "任务不存在".to_string())
     }
 
     /// 删除任务（P5 RPC task.delete）：停 job → 清缓存（文件+分片索引）→
@@ -3000,10 +3074,12 @@ impl TaskManager {
         if mode == CacheMode::Online {
             return Ok(false);
         }
-        // media 已在内存（会话内暂停/恢复）：跳过重新解析直接起 job
+        // media 已在内存（会话内暂停/恢复）：跳过重新解析直接起 job。
+        // F3：job 已在途时 spawn 去重早退返回 false → 上层按「无需激活」处理，
+        // 不改写状态（否则 resume 假成功，界面「下载中」却永无下载）。
         if self.media.lock().await.contains_key(task_id) {
-            self.spawn_download_job(task_id.to_string()).await;
-            return Ok(true);
+            let started = self.spawn_download_job(task_id.to_string()).await;
+            return Ok(started);
         }
         {
             let stops = self.job_stops.lock().await;
@@ -3036,6 +3112,14 @@ impl TaskManager {
                 protected.insert(id.clone());
             }
         }
+        {
+            // F2：正在起播解析中的任务（probing 去重集）同样不许被清理，
+            // 否则复用任务在探测窗口内会被 stale sweep 连根删掉。
+            let probing = self.probing.lock().await;
+            for id in probing.iter() {
+                protected.insert(id.clone());
+            }
+        }
         let policy = self.cache_policy();
         let report = cleanup::sweep(
             &self.store,
@@ -3063,11 +3147,20 @@ impl TaskManager {
             )
             .await;
         }
-        // 内存同步：被清理任务移出任务表
+        // 内存同步：被清理任务移出任务表，并摘除 media/健康度/job_stops 等
+        // 全部内存痕迹（F2：只删 tasks 会遗留 media/healths/job_stops/last_touch，
+        // 在跑 job 还会复活 DB 行）。forget_task 自身会锁 tasks，
+        // 必须等 tasks 锁 drop 之后再逐个调用，避免自锁。
         if !report.removed_ids.is_empty() {
-            let mut tasks = self.tasks.lock().await;
-            for id in &report.removed_ids {
-                tasks.remove(id);
+            let removed = report.removed_ids.clone();
+            {
+                let mut tasks = self.tasks.lock().await;
+                for id in &removed {
+                    tasks.remove(id);
+                }
+            }
+            for id in &removed {
+                self.forget_task(id).await;
             }
         }
         report

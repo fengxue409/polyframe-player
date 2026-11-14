@@ -173,7 +173,7 @@ onMounted(() => {
       <div class="empty-ico">🕘</div>
       <div class="empty-title">还没有播放记录</div>
       <div class="empty-sub">在首页、发现页或媒体库点开任意影片，看过之后就会出现在这里，下次直接从上次的位置继续。</div>
-      <button class="btn primary sm" @click="store.go('discover')">去发现页看看</button>
+      <button class="btn primary sm" @click="store.goDiscover()">去发现页看看</button>
     </div>
 
     <div v-else class="hist-groups">
@@ -380,7 +380,7 @@ onMounted(() => {
   font-size: 10px;
   font-weight: 500;
   line-height: 16px;
-  color: #cdd7e8;
+  color: var(--ov-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -399,7 +399,7 @@ onMounted(() => {
   border-radius: 50%;
   border: 1px solid rgb(255 255 255 / 0.16);
   background: rgb(6 9 14 / 0.72);
-  color: #e6ecf7;
+  color: var(--ov-text);
   font-size: 14px;
   line-height: 1;
   opacity: 0;
@@ -427,7 +427,7 @@ onMounted(() => {
   padding-left: 3px;
   border-radius: 50%;
   border: 1px solid rgb(255 255 255 / 0.22);
-  background: rgb(76 125 255 / 0.88);
+  background: color-mix(in srgb, var(--accent) 88%, transparent);
   color: #fff;
   font-size: 13px;
   backdrop-filter: blur(6px);
@@ -488,7 +488,7 @@ onMounted(() => {
   background: rgb(6 9 14 / 0.66);
   backdrop-filter: blur(2px);
   font-size: var(--fs-2xs);
-  color: #dbe3f2;
+  color: var(--ov-text);
 }
 
 /* ---- 卡片文字区 ---- */

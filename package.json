@@ -1,7 +1,7 @@
 {
   "name": "polyframe-player",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "PolyFrame Player —— 多源镜像聚合 + 自动分片 + 多线程加载 + 边下边播的桌面播放器",
   "scripts": {
     "dev": "pnpm --filter @polyframe/desktop dev",
